@@ -452,6 +452,10 @@
 
   // ── Eigentümerabrechnung ──
   // In der Karte nur eine Zeile; Erfassen und Bearbeiten im Overlay.
+  // Verwalter rechnen mit ungerundeten Einzelbeträgen; wenige Cent
+  // Abweichung zur Summe der gerundeten Positionen sind normal.
+  const RUNDUNG = 0.05;
+
   // summe/umlage/abweichung: nur Verwalterabrechnung (Kontrolle gegen die
   // Abrechnung). eigene/umlageGesamt: zusätzlich eigene Kosten (Grundsteuer).
   function eaSummen(ea) {
@@ -480,7 +484,7 @@
         tx(' · umlagefähig '),
         mk('strong', { text: euro(z.umlageGesamt) }),
         !ea.eigeneKosten.length ? mk('span.badge.warn', { text: 'Grundsteuer fehlt', style: 'margin-left:8px' }) : null,
-        z.abweichung != null && Math.abs(z.abweichung) > 0.009 ? mk('span.badge.bad', { text: `weicht ${euro(z.abweichung)} ab`, style: 'margin-left:8px' }) : null,
+        z.abweichung != null && Math.abs(z.abweichung) > RUNDUNG ? mk('span.badge.bad', { text: `weicht ${euro(z.abweichung)} ab`, style: 'margin-left:8px' }) : null,
       ]),
       btn('Öffnen', oeffnen, 'sm sec'),
     ]);
@@ -563,7 +567,8 @@
         mk('div', {}, [tx('davon umlagefähig: '), mk('strong.pos', { text: euro(z.umlage) })]),
         mk('div', {}, [tx('nicht umlagefähig: '), mk('strong', { text: euro(z.nichtUmlage) })]),
         z.abweichung == null ? mk('span.badge', { text: 'Kontrollsumme fehlt' })
-          : Math.abs(z.abweichung) < 0.01 ? mk('span.badge.ok', { text: 'stimmt mit der Abrechnung überein' })
+          : Math.abs(z.abweichung) < 0.005 ? mk('span.badge.ok', { text: 'stimmt mit der Abrechnung überein' })
+            : Math.abs(z.abweichung) <= RUNDUNG ? mk('span.badge.ok', { text: `stimmt (Rundungsdifferenz ${euro(Math.abs(z.abweichung))})` })
             : mk('span.badge.bad', { text: `Abweichung ${euro(z.abweichung)}` }),
       );
     }
