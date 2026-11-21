@@ -787,10 +787,16 @@
 
     const umlagePositionen = ea.positionen.filter(p => p.umlagefaehig)
       .sort((a, b) => (parseInt(a.nr, 10) || 0) - (parseInt(b.nr, 10) || 0));
+    // Neue Gruppe nur an echten Lücken der Nummerierung der Verwaltung
+    // (z.B. 11 → 14), nicht an weggelassenen nicht umlagefähigen Positionen.
+    const alleNr = new Set(ea.positionen.map(p => parseInt(p.nr, 10)).filter(Number.isFinite));
     let vorherNr = null;
     const zeilen = umlagePositionen.map(p => {
       const nr = parseInt(p.nr, 10);
-      const neueGruppe = vorherNr != null && Number.isFinite(nr) && nr - vorherNr > 1;
+      let neueGruppe = false;
+      if (vorherNr != null && Number.isFinite(nr)) {
+        for (let n = vorherNr + 1; n < nr; n++) if (!alleNr.has(n)) { neueGruppe = true; break; }
+      }
       vorherNr = Number.isFinite(nr) ? nr : vorherNr;
       const istHeizung = p.schluesselTyp === 'Zähl.' || /heiz/i.test(p.bezeichnung);
       let anteil;
