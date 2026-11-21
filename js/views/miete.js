@@ -118,7 +118,7 @@
     let vorher = null; // letzter Monat mit Zahlung, für "NK geändert"
     const monate = monateDesJahres(jahr).map(monat => {
       const mv = mvs.find(mv => mvLaeuftIm(mv, monat)) || null;
-      const kalt = mv ? mv.kaltmiete || 0 : 0;
+      const kalt = mv ? kaltmieteIm(mv, monat) : 0;
       const ist = zahlungen.filter(t => monthKey(t.datum) === monat).reduce((s, t) => s + t.betrag, 0);
       const vzIst = mv && kalt ? Math.max(ist - kalt, 0) : 0;
       const zeile = { monat, mv, kalt, ist, vzIst, nkGeaendert: false };
@@ -226,8 +226,12 @@
   }
 
   function mietverhaeltnisZeile(mv) {
+    const aenderungen = (mv.kaltmieteAenderungen || []).filter(a => a.ab).sort((a, b) => (a.ab < b.ab ? -1 : 1));
+    const kaltText = aenderungen.length
+      ? [`${euro(mv.kaltmiete)} kalt`, ...aenderungen.map(a => `ab ${monthLabel(a.ab)} ${euro(a.betrag)}`)].join(' · ')
+      : `${euro(mv.kaltmiete)} kalt`;
     const betrag = mv.kaltmiete
-      ? `${euro(mv.kaltmiete)} kalt` + (mv.vorauszahlung ? ` · NK laut Vertrag ${euro(mv.vorauszahlung)}` : '')
+      ? kaltText + (mv.vorauszahlung ? ` · NK laut Vertrag ${euro(mv.vorauszahlung)}` : '')
       : null;
     return mk('div.mv-zeile', {}, [
       mk('div', {}, [
@@ -256,11 +260,26 @@
       vz: eingabe(mv?.vorauszahlung, '€', 'betrag'),
       namen: mk('input', { type: 'text', value: mv ? mv.zahlerNamen.join(', ') : '', placeholder: 'leer = Name der Mieter*in' }),
     };
+    // Änderungen der Kaltmiete (z.B. vereinbarte Minderung am Anfang oder
+    // Mieterhöhung): je Zeile "ab Monat" + neuer Betrag.
+    const aenderungen = (mv?.kaltmieteAenderungen || []).map(a => ({ ab: eingabe(a.ab, null, 'month'), betrag: eingabe(a.betrag, '€', 'betrag') }));
+    const aenderungsBox = mk('div.mv-aenderungen');
+    const zeichneAenderungen = () => {
+      aenderungsBox.replaceChildren(
+        ...aenderungen.map(a => mk('div.row', {}, [
+          wrap('Kaltmiete ab', a.ab), wrap('Betrag', a.betrag),
+          mk('div.field', {}, [btn('✕', () => { aenderungen.splice(aenderungen.indexOf(a), 1); zeichneAenderungen(); }, 'sm sec')]),
+        ])),
+        mk('div.field', {}, [btn('+ Kaltmiete ändert sich ab …', () => { aenderungen.push({ ab: eingabe('', null, 'month'), betrag: eingabe(0, '€', 'betrag') }); zeichneAenderungen(); }, 'sm sec')]),
+      );
+    };
+    zeichneAenderungen();
     f.zeilen = [
       mk('div.row', {}, [
         wrap('Mieter*in', f.mieter), wrap('Von', f.von), wrap('Bis (leer = läuft)', f.bis),
-        wrap('Kaltmiete', f.kalt), wrap('NK laut Vertrag (nur Info)', f.vz),
+        wrap('Kaltmiete (ab Beginn)', f.kalt), wrap('NK laut Vertrag (nur Info)', f.vz),
       ]),
+      aenderungsBox,
       mk('div.row', {}, [
         mk('div.field.mv-namen', {}, [mk('label', { text: 'Namen auf dem Kontoauszug (mehrere mit Komma trennen)' }), f.namen]),
       ]),
@@ -270,6 +289,7 @@
       return {
         mieter: f.mieter.value.trim(), von: f.von.value, bis: f.bis.value,
         kaltmiete: zahl(f.kalt.value), vorauszahlung: zahl(f.vz.value),
+        kaltmieteAenderungen: aenderungen.filter(a => a.ab.value).map(a => ({ ab: a.ab.value, betrag: zahl(a.betrag.value) })),
         zahlerNamen: namen.length ? namen : (f.mieter.value.trim() ? [f.mieter.value.trim()] : []),
       };
     };

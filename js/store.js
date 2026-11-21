@@ -13,7 +13,7 @@
       mietobjekte: [],   // {id, name, mieterName, sollMiete, kontoId, beginn, notizen} – altes Modell, wird nicht mehr angezeigt
       wohnungen: [],     // {id, name, flaeche, mea, selbstgenutzt}
       eigentuemerabrechnungen: [], // {id, wohnungId, jahr: 'YYYY', summeLautAbrechnung, positionen: [{id, nr, bezeichnung, schluessel, betrag, umlagefaehig}], eigeneKosten: [{id, bezeichnung, betrag, umlagefaehig, buchungIds: []}]}
-      mietverhaeltnisse: [], // {id, wohnungId, mieter, von: 'YYYY-MM', bis: 'YYYY-MM'|'', kaltmiete, vorauszahlung, zahlerNamen: []}
+      mietverhaeltnisse: [], // {id, wohnungId, mieter, von: 'YYYY-MM', bis: 'YYYY-MM'|'', kaltmiete, kaltmieteAenderungen: [{ab: 'YYYY-MM', betrag}], vorauszahlung, zahlerNamen: []}
       kategorien: [],    // verwaltete Liste der Kategorienamen
       unterkategorien: [], // {id, kategorie, name} – hängen jeweils an einer Kategorie
       empfaengerAliase: [], // {id, alias, kanonisch} – Schreibweise-Varianten (z.B. verschiedener Bank-Exporte) auf einen Namen zusammengeführt
@@ -77,7 +77,11 @@
         }))
       : [];
     normalized.mietverhaeltnisse = Array.isArray(normalized.mietverhaeltnisse)
-      ? normalized.mietverhaeltnisse.map(mv => ({ mieter: '', von: '', bis: '', kaltmiete: 0, vorauszahlung: 0, ...mv, zahlerNamen: Array.isArray(mv.zahlerNamen) ? mv.zahlerNamen : [] }))
+      ? normalized.mietverhaeltnisse.map(mv => ({
+          mieter: '', von: '', bis: '', kaltmiete: 0, vorauszahlung: 0, ...mv,
+          zahlerNamen: Array.isArray(mv.zahlerNamen) ? mv.zahlerNamen : [],
+          kaltmieteAenderungen: Array.isArray(mv.kaltmieteAenderungen) ? mv.kaltmieteAenderungen : [],
+        }))
       : [];
     // Alte "Empfänger-Kategorien" (vor der Umstellung auf Automatisierungsregeln)
     // nur noch lokal für die Migration unten verwenden — der Zustand selbst
@@ -714,7 +718,7 @@
     save();
   }
   function addMietverhaeltnis(data) {
-    const mv = { id: uid(), wohnungId: '', mieter: '', von: todayISO().slice(0, 7), bis: '', kaltmiete: 0, vorauszahlung: 0, zahlerNamen: [], ...data };
+    const mv = { id: uid(), wohnungId: '', mieter: '', von: todayISO().slice(0, 7), bis: '', kaltmiete: 0, kaltmieteAenderungen: [], vorauszahlung: 0, zahlerNamen: [], ...data };
     state.mietverhaeltnisse.push(mv);
     save();
     return mv;
@@ -750,6 +754,15 @@
   }
   function istMietEingang(t) {
     return istMietBuchung(t) && t.betrag > 0;
+  }
+
+  // Kaltmiete in einem Monat: die letzte Änderung mit "ab" <= Monat, sonst
+  // die Kaltmiete ab Mietbeginn.
+  function kaltmieteIm(mv, monat) {
+    const aenderung = (mv.kaltmieteAenderungen || [])
+      .filter(a => a.ab && a.ab <= monat)
+      .sort((a, b) => (a.ab < b.ab ? 1 : -1))[0];
+    return aenderung ? aenderung.betrag || 0 : mv.kaltmiete || 0;
   }
 
   function mvLaeuftIm(mv, monat) {
@@ -865,5 +878,6 @@
   window.istMietBuchung = istMietBuchung;
   window.mietZuordnungFuerBuchung = mietZuordnungFuerBuchung;
   window.mvLaeuftIm = mvLaeuftIm;
+  window.kaltmieteIm = kaltmieteIm;
   window.mietverhaeltnisFuerBuchung = mietverhaeltnisFuerBuchung;
 })();
