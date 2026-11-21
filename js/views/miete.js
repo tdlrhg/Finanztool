@@ -861,6 +861,17 @@
       <tr class="abstand"><td colspan="6"></td></tr>
       <tr><td>${esc(z.bezeichnung)}</td><td class="dp">:</td><td></td><td></td><td></td><td class="r">${betrag(z.anteil)}</td></tr>`;
     const ergebnisText = a.ergebnis >= 0 ? 'Guthaben' : 'Nachzahlung';
+    // Konkrete Anteile für den Kopf aus den Schlüsseln der Positionen,
+    // z.B. "85,23/495" → "85,23 von 495".
+    const anteilVon = typ => {
+      const p = a.ea.positionen.find(x => x.schluesselTyp === typ && x.schluesselAnteil);
+      if (!p) return null;
+      const [teil, ganz] = p.schluesselAnteil.split('/').map(x => x.trim());
+      return ganz ? `${teil} von ${ganz}` : teil;
+    };
+    const kopfAnteile = [['Wohnfläche (qm)', 'qm'], ['Wohnanteil (WA)', 'WA'], ['Punkte', 'Punkte']]
+      .map(([label, typ]) => [label, anteilVon(typ)]).filter(([, wert]) => wert)
+      .map(([label, wert]) => `<tr><td>${esc(label)}</td><td>:</td><td>${esc(wert)}</td></tr>`).join('');
 
     const html = `<!doctype html><html lang="de"><head><meta charset="utf-8">
 <title>NK-Abr. ${esc(jahr)} ${esc(mieter)}</title>
@@ -897,6 +908,7 @@ ${a.hinweise.length ? `<div class="hinweise"><strong>Bitte prüfen (wird nicht g
   <table class="daten">
     <tr><td>Mieter</td><td>:</td><td>${esc(mieter)}</td></tr>
     <tr><td>Abgerechneter Zeitraum</td><td>:</td><td><strong>${tag(a.von)} – ${tag(a.bis, true)}</strong></td></tr>
+    ${kopfAnteile}
   </table>
   <div class="kasten schluessel">
     <strong>Umlageschlüsselbezeichnung</strong>
