@@ -718,8 +718,13 @@
     if (!istMietEingang(t)) return null;
     const text = `${t.empfaenger || ''} ${t.beschreibung || ''}`.toLowerCase();
     const monat = monthKey(t.datum);
-    return state.mietverhaeltnisse.find(mv => mvLaeuftIm(mv, monat)
-      && mv.zahlerNamen.some(n => n.trim().length >= 3 && text.includes(n.trim().toLowerCase()))) || null;
+    // Alle Wörter des Namens müssen vorkommen, die Reihenfolge ist egal —
+    // Banken schreiben oft "Nachname, Vorname".
+    const passt = name => {
+      const woerter = name.toLowerCase().split(/[\s,]+/).filter(w => w.length >= 2);
+      return woerter.join('').length >= 3 && woerter.every(w => text.includes(w));
+    };
+    return state.mietverhaeltnisse.find(mv => mvLaeuftIm(mv, monat) && mv.zahlerNamen.some(passt)) || null;
   }
 
   window.getState = getState;

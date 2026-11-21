@@ -8,6 +8,12 @@
 
   const JAHR_KEY = 'finanztool_miete_jahr';
 
+  // UI-Zustand, der ein Neuzeichnen überlebt: welche Bereiche aufgeklappt
+  // sind und was gerade bearbeitet wird (Wohnungs- oder Mietverhältnis-ID,
+  // 'neu:<wohnungId>' für ein neues Mietverhältnis).
+  const offen = new Set();
+  let bearbeite = null;
+
   function ladeJahr() {
     try { return localStorage.getItem(JAHR_KEY) || ''; } catch (e) { return ''; }
   }
@@ -19,9 +25,14 @@
     return Array.from({ length: 12 }, (_, i) => `${jahr}-${String(i + 1).padStart(2, '0')}`);
   }
 
+  // Akzeptiert "650,50" genauso wie "650.50".
   function zahl(v) {
-    const n = parseFloat(String(v).replace(',', '.'));
+    const n = parseFloat(String(v ?? '').replace(/\s/g, '').replace(',', '.'));
     return Number.isFinite(n) ? n : 0;
+  }
+
+  function zahlText(n) {
+    return n ? String(n).replace('.', ',') : '';
   }
 
   function mvLabel(mv) {
@@ -29,11 +40,22 @@
     return `${w ? w.name : '?'} – ${mv.mieter || 'ohne Namen'}`;
   }
 
+  function mvZeitraum(mv) {
+    if (!mv.von) return 'ohne Beginn';
+    return mv.bis ? `${monthLabel(mv.von)} – ${monthLabel(mv.bis)}` : `seit ${monthLabel(mv.von)}`;
+  }
+
   function mietEingaengeImJahr(jahr) {
     return getState().transaktionen
       .filter(t => (t.datum || '').startsWith(jahr))
       .filter(t => istMietEingang(t) || t.mietZuordnung)
       .sort((a, b) => (a.datum < b.datum ? -1 : 1));
+  }
+
+  function aufklappbar(key, summaryText, inhalt, cls = 'mv-details') {
+    const d = mk(`details.${cls}`, { open: offen.has(key) || null }, [mk('summary', { text: summaryText }), ...[].concat(inhalt)]);
+    d.addEventListener('toggle', () => { if (d.open) offen.add(key); else offen.delete(key); });
+    return d;
   }
 
   function renderMiete(root) {
@@ -44,6 +66,8 @@
     root.appendChild(mk('h1', { text: 'Mietverwaltung' }));
     root.appendChild(mk('div.sub', { text: 'Wohnungen, Mietverhältnisse und die Zahlungseingänge auf den Mietkonten.' }));
 
+    root.appendChild(anleitung(!state.wohnungen.length));
+
     if (!state.konten.some(k => k.typ === 'miete')) {
       root.appendChild(mk('div.card', {}, [mk('div.empty', { text: 'Noch kein Konto mit dem Typ „Mietkonto“. Zahlungen werden nur von Mietkonten zugeordnet.' })]));
     }
@@ -53,24 +77,235 @@
     const jahrSel = mk('select', { onchange: e => { speichereJahr(e.target.value); rerender(); } },
       [...jahre].sort().reverse().map(j => mk('option', { value: j, text: j, selected: j === jahr })));
 
-    root.appendChild(mk('div.card', {}, [
-      mk('div.row', {}, [wrap('Jahr', jahrSel)]),
-    ]));
+    root.appendChild(mk('div.card', {}, [mk('div.row', {}, [wrap('Jahr', jahrSel)])]));
 
     state.wohnungen.forEach(w => root.appendChild(wohnungCard(w, jahr)));
     root.appendChild(neueWohnungForm());
     root.appendChild(nichtZugeordnetCard(jahr));
   }
 
-  // ── Wohnung anlegen ──
+  function anleitung(aufgeklappt) {
+    const d = mk('details.card.mv-anleitung', { open: aufgeklappt || offen.has('anleitung') || null }, [
+      mk('summary', { text: 'So funktioniert die Mietverwaltung' }),
+      mk('ol', {}, [
+        mk('li', { text: 'Wohnung anlegen, bei vermieteten Wohnungen gleich mit dem ersten Mieter.' }),
+        mk('li', { text: 'Im Mietverhältnis die Kaltmiete und die Namen eintragen, wie sie auf dem Kontoauszug stehen (z.B. auch Partner*in, die überweist). Alles, was über die Kaltmiete hinaus gezahlt wird, zählt als Nebenkosten-Vorauszahlung.' }),
+        mk('li', { text: 'Zahlungseingänge auf dem Mietkonto werden über diese Namen automatisch zugeordnet. Was nicht passt, steht ganz unten unter „Nicht zugeordnete Eingänge“ und lässt sich dort von Hand zuweisen.' }),
+      ]),
+      mk('div.sub', { text: 'Monate ohne Mietverhältnis gelten als Leerstand. Bei einem Mieterwechsel legst du in der Wohnung ein weiteres Mietverhältnis an.' }),
+    ]);
+    d.addEventListener('toggle', () => { if (d.open) offen.add('anleitung'); else offen.delete('anleitung'); });
+    return d;
+  }
+
+  // ── Monatsdaten einer Wohnung ──
+  // Die Kaltmiete ist fest vereinbart; alles, was ein Monat darüber hinaus
+  // bringt, gilt als Nebenkosten-Vorauszahlung. So muss eine geänderte
+  // Vorauszahlung nicht nachgepflegt werden. Liegt die Zahlung unter der
+  // Kaltmiete, zählt keine Vorauszahlung und der Monat wird markiert.
+  function monatsDaten(mvs, jahr) {
+    const mvIds = new Set(mvs.map(mv => mv.id));
+    const zahlungen = mietEingaengeImJahr(jahr).filter(t => {
+      const mv = mietverhaeltnisFuerBuchung(t);
+      return mv && mvIds.has(mv.id);
+    });
+    const summe = { kalt: 0, ist: 0, vzIst: 0, offen: 0, ohneBetrag: 0, vermietet: 0, ohneZahlung: 0 };
+    let vorher = null; // letzter Monat mit Zahlung, für "NK geändert"
+    const monate = monateDesJahres(jahr).map(monat => {
+      const mv = mvs.find(mv => mvLaeuftIm(mv, monat)) || null;
+      const kalt = mv ? mv.kaltmiete || 0 : 0;
+      const ist = zahlungen.filter(t => monthKey(t.datum) === monat).reduce((s, t) => s + t.betrag, 0);
+      const vzIst = mv && kalt ? Math.max(ist - kalt, 0) : 0;
+      const zeile = { monat, mv, kalt, ist, vzIst, nkGeaendert: false };
+      if (mv && kalt && ist >= kalt - 0.009) {
+        if (vorher && vorher.mv === mv && Math.abs(vorher.vzIst - vzIst) > 0.009) zeile.nkGeaendert = true;
+        vorher = zeile;
+      }
+      summe.kalt += kalt; summe.ist += ist; summe.vzIst += vzIst;
+      if (mv) summe.vermietet++;
+      if (mv && !kalt) summe.ohneBetrag++;
+      if (mv && kalt && !ist) summe.ohneZahlung++;
+      if (mv && kalt && ist < kalt) summe.offen += kalt - ist;
+      return zeile;
+    });
+    return { monate, summe, zahlungen };
+  }
+
+  function statusBadge(z) {
+    if (!z.mv) return z.ist ? mk('span.badge.warn', { text: 'Zahlung bei Leerstand' }) : mk('span.badge', { text: 'Leerstand' });
+    if (!z.kalt) return mk('span.badge.warn', { text: 'Kaltmiete eintragen' });
+    if (!z.ist) return mk('span.badge.bad', { text: 'keine Zahlung gefunden' });
+    if (z.ist < z.kalt - 0.009) return mk('span.badge.bad', { text: `${euro(z.kalt - z.ist)} unter Kaltmiete` });
+    if (z.nkGeaendert) return mk('span.badge.warn', { text: `NK geändert: ${euro(z.vzIst)}` });
+    return mk('span.badge.ok', { text: 'bezahlt' });
+  }
+
+  // ── Wohnungskarte ──
+  function wohnungCard(w, jahr) {
+    const state = getState();
+    const mvs = state.mietverhaeltnisse.filter(mv => mv.wohnungId === w.id).sort((a, b) => (a.von < b.von ? -1 : 1));
+    const card = mk('div.card');
+
+    if (bearbeite === w.id) {
+      card.appendChild(wohnungFormular(w));
+    } else {
+      const stamm = [w.flaeche ? `${zahlText(w.flaeche)} m²` : null, w.mea ? `MEA ${zahlText(w.mea)}` : null].filter(Boolean).join(' · ');
+      card.appendChild(mk('div.flex-between', {}, [
+        mk('h2', { text: w.name + (w.selbstgenutzt ? ' (selbst bewohnt)' : '') }),
+        btn('Bearbeiten', () => { bearbeite = w.id; rerender(); }, 'sm sec'),
+      ]));
+      if (stamm) card.appendChild(mk('div.sub', { text: stamm }));
+    }
+    if (w.selbstgenutzt) return card;
+
+    const { monate, summe, zahlungen } = monatsDaten(mvs, jahr);
+    card.appendChild(jahresZeile(mvs, summe, jahr));
+
+    // Mietverhältnisse als Textzeilen, Bearbeiten öffnet das Formular.
+    const liste = mk('div.mv-liste');
+    if (!mvs.length) liste.appendChild(mk('div.sub', { text: 'Noch kein Mietverhältnis. Ohne Mietverhältnis gilt die Wohnung als leer stehend.' }));
+    mvs.forEach(mv => liste.appendChild(bearbeite === mv.id ? mietverhaeltnisFormular(mv, w) : mietverhaeltnisZeile(mv)));
+    if (bearbeite === 'neu:' + w.id) liste.appendChild(mietverhaeltnisFormular(null, w));
+    else liste.appendChild(mk('div', { style: 'margin-top:8px' }, [btn('+ Mietverhältnis hinzufügen', () => { bearbeite = 'neu:' + w.id; rerender(); }, 'sm sec')]));
+    card.appendChild(liste);
+
+    card.appendChild(aufklappbar(`monate:${w.id}`, `Monate ${jahr} anzeigen`, [monatsTabelle(monate, summe, jahr)]));
+    card.appendChild(aufklappbar(`zahlungen:${w.id}`, `Zugeordnete Zahlungen ${jahr} (${zahlungen.length})`,
+      [zahlungen.length ? buchungsTabelle(zahlungen) : mk('div.empty', { text: 'Keine zugeordneten Zahlungen.' })]));
+    return card;
+  }
+
+  function jahresZeile(mvs, summe, jahr) {
+    const teile = [];
+    if (!summe.vermietet) {
+      teile.push(mk('span.badge', { text: `${jahr}: Leerstand` }));
+    } else {
+      teile.push(mk('span', { text: `${jahr}: ${euro(summe.ist)} erhalten` }));
+      if (summe.ohneBetrag) teile.push(mk('span.badge.warn', { text: 'Kaltmiete im Mietverhältnis eintragen' }));
+      else if (summe.offen > 0.009) teile.push(mk('span.badge.bad', { text: `${euro(summe.offen)} unter Kaltmiete` }));
+      else teile.push(mk('span.badge.ok', { text: 'alles bezahlt' }));
+      if (!summe.ohneBetrag) teile.push(mk('span', { text: `davon NK-Vorauszahlung ${euro(summe.vzIst)}` }));
+      const leer = 12 - summe.vermietet;
+      if (leer) teile.push(mk('span.badge', { text: `${leer} ${leer === 1 ? 'Monat' : 'Monate'} Leerstand` }));
+    }
+    return mk('div.mv-jahr', {}, teile);
+  }
+
+  function mietverhaeltnisZeile(mv) {
+    const betrag = mv.kaltmiete
+      ? `${euro(mv.kaltmiete)} kalt` + (mv.vorauszahlung ? ` · NK laut Vertrag ${euro(mv.vorauszahlung)}` : '')
+      : null;
+    return mk('div.mv-zeile', {}, [
+      mk('div', {}, [
+        mk('div.mv-zeile-titel', { text: `${mv.mieter || 'ohne Namen'} · ${mvZeitraum(mv)}` }),
+        mk('div.sub', {}, [
+          betrag ? tx(betrag) : mk('span.badge.warn', { text: 'Kaltmiete fehlt' }),
+          tx(` · Namen: ${mv.zahlerNamen.length ? mv.zahlerNamen.join(', ') : '—'}`),
+        ]),
+      ]),
+      btn('Bearbeiten', () => { bearbeite = mv.id; rerender(); }, 'sm sec'),
+    ]);
+  }
+
+  // ── Formulare ──
+  function eingabe(value, placeholder, type = 'text') {
+    if (type === 'betrag') return mk('input.mv-betrag', { type: 'text', inputmode: 'decimal', value: zahlText(value), placeholder: placeholder || '€' });
+    return mk('input', { type, value: value ?? '', placeholder: placeholder || null });
+  }
+
+  function mieterFelder(mv) {
+    const f = {
+      mieter: eingabe(mv?.mieter, 'Name'),
+      von: eingabe(mv?.von || todayISO().slice(0, 7), null, 'month'),
+      bis: eingabe(mv?.bis, null, 'month'),
+      kalt: eingabe(mv?.kaltmiete, '€', 'betrag'),
+      vz: eingabe(mv?.vorauszahlung, '€', 'betrag'),
+      namen: mk('input', { type: 'text', value: mv ? mv.zahlerNamen.join(', ') : '', placeholder: 'leer = Name der Mieter*in' }),
+    };
+    f.zeilen = [
+      mk('div.row', {}, [
+        wrap('Mieter*in', f.mieter), wrap('Von', f.von), wrap('Bis (leer = läuft)', f.bis),
+        wrap('Kaltmiete', f.kalt), wrap('NK laut Vertrag (nur Info)', f.vz),
+      ]),
+      mk('div.row', {}, [
+        mk('div.field.mv-namen', {}, [mk('label', { text: 'Namen auf dem Kontoauszug (mehrere mit Komma trennen)' }), f.namen]),
+      ]),
+    ];
+    f.werte = () => {
+      const namen = f.namen.value.split(',').map(n => n.trim()).filter(Boolean);
+      return {
+        mieter: f.mieter.value.trim(), von: f.von.value, bis: f.bis.value,
+        kaltmiete: zahl(f.kalt.value), vorauszahlung: zahl(f.vz.value),
+        zahlerNamen: namen.length ? namen : (f.mieter.value.trim() ? [f.mieter.value.trim()] : []),
+      };
+    };
+    return f;
+  }
+
+  function mietverhaeltnisFormular(mv, w) {
+    const f = mieterFelder(mv);
+    const speichern = btn('Speichern', () => {
+      const werte = f.werte();
+      if (!werte.mieter) { f.mieter.focus(); return; }
+      if (!werte.von) { f.von.focus(); return; }
+      if (!werte.kaltmiete) { f.kalt.focus(); return; }
+      if (mv) updateMietverhaeltnis(mv.id, werte);
+      else addMietverhaeltnis({ wohnungId: w.id, ...werte });
+      bearbeite = null;
+      rerender();
+    }, 'sm');
+    const abbrechen = btn('Abbrechen', () => { bearbeite = null; rerender(); }, 'sm sec');
+    const loeschen = mv ? btn('Mietverhältnis löschen', () => {
+      if (confirm(`Mietverhältnis „${mv.mieter || 'ohne Namen'}“ löschen? Die Buchungen bleiben erhalten.`)) { bearbeite = null; deleteMietverhaeltnis(mv.id); rerender(); }
+    }, 'sm danger') : null;
+    return mk('div.mv-block', {}, [
+      mk('div.mv-zeile-titel', { text: mv ? 'Mietverhältnis bearbeiten' : 'Neues Mietverhältnis' }),
+      ...f.zeilen,
+      mk('div.row', { style: 'margin-bottom:12px' }, [speichern, abbrechen, loeschen]),
+    ]);
+  }
+
+  function wohnungFormular(w) {
+    const name = eingabe(w.name);
+    const flaeche = eingabe(w.flaeche, 'm²', 'betrag');
+    const mea = eingabe(w.mea, 'z.B. 125,5', 'betrag');
+    const selbst = mk('input', { type: 'checkbox', checked: w.selbstgenutzt || null });
+    return mk('div', {}, [
+      mk('h2', { text: 'Wohnung bearbeiten' }),
+      mk('div.row', {}, [
+        wrap('Name', name), wrap('Wohnfläche (m²)', flaeche), wrap('Miteigentumsanteil', mea),
+        mk('label.inline-check', {}, [selbst, tx('selbst bewohnt')]),
+      ]),
+      mk('div.row', { style: 'margin-bottom:12px' }, [
+        btn('Speichern', () => {
+          if (!name.value.trim()) { name.focus(); return; }
+          updateWohnung(w.id, { name: name.value.trim(), flaeche: zahl(flaeche.value), mea: zahl(mea.value), selbstgenutzt: selbst.checked });
+          bearbeite = null;
+          rerender();
+        }, 'sm'),
+        btn('Abbrechen', () => { bearbeite = null; rerender(); }, 'sm sec'),
+        btn('Wohnung löschen', () => {
+          if (confirm(`Wohnung „${w.name}“ mit allen Mietverhältnissen löschen? Die Buchungen bleiben erhalten.`)) { bearbeite = null; deleteWohnung(w.id); rerender(); }
+        }, 'sm danger'),
+      ]),
+    ]);
+  }
+
   function neueWohnungForm() {
-    const name = mk('input', { type: 'text', placeholder: 'z.B. Wohnung 1. OG' });
-    const flaeche = mk('input', { type: 'number', step: '0.01', placeholder: 'm²' });
-    const mea = mk('input', { type: 'number', step: '0.001', placeholder: 'z.B. 125,5' });
+    const name = eingabe('', 'z.B. Wohnung 1. OG');
+    const flaeche = eingabe(0, 'm²', 'betrag');
+    const mea = eingabe(0, 'z.B. 125,5', 'betrag');
     const selbst = mk('input', { type: 'checkbox' });
+    const f = mieterFelder(null);
+    const mieterBereich = mk('div', {}, [mk('div.mv-zeile-titel', { text: 'Erste*r Mieter*in (leer lassen, wenn die Wohnung gerade leer steht)' }), ...f.zeilen]);
+    selbst.addEventListener('change', () => { mieterBereich.style.display = selbst.checked ? 'none' : ''; });
+
     const submit = btn('Wohnung anlegen', () => {
       if (!name.value.trim()) { name.focus(); return; }
-      addWohnung({ name: name.value.trim(), flaeche: zahl(flaeche.value), mea: zahl(mea.value), selbstgenutzt: selbst.checked });
+      const werte = f.werte();
+      if (!selbst.checked && werte.mieter && !werte.von) { f.von.focus(); return; }
+      const w = addWohnung({ name: name.value.trim(), flaeche: zahl(flaeche.value), mea: zahl(mea.value), selbstgenutzt: selbst.checked });
+      if (!selbst.checked && werte.mieter) addMietverhaeltnis({ wohnungId: w.id, ...werte });
       rerender();
     });
     return mk('div.card', {}, [
@@ -78,172 +313,43 @@
       mk('div.row', {}, [
         wrap('Name', name), wrap('Wohnfläche (m²)', flaeche), wrap('Miteigentumsanteil', mea),
         mk('label.inline-check', {}, [selbst, tx('selbst bewohnt')]),
-        submit,
       ]),
+      mieterBereich,
+      mk('div.row', {}, [submit]),
     ]);
   }
 
-  // ── Wohnung mit Mietverhältnissen und Monatstabelle ──
-  function wohnungCard(w, jahr) {
-    const state = getState();
-    const mvs = state.mietverhaeltnisse.filter(mv => mv.wohnungId === w.id).sort((a, b) => (a.von < b.von ? -1 : 1));
-
-    const kopf = mk('div.flex-between', {}, [
-      mk('h2', { text: w.name + (w.selbstgenutzt ? ' (selbst bewohnt)' : '') }),
-      btn('Wohnung löschen', () => {
-        if (confirm(`Wohnung „${w.name}“ mit allen Mietverhältnissen löschen? Die Buchungen bleiben erhalten.`)) { deleteWohnung(w.id); rerender(); }
-      }, 'sm danger'),
-    ]);
-
-    const stammdaten = mk('div.row', {}, [
-      wrap('Name', feld('text', w.name, v => updateWohnung(w.id, { name: v.trim() || w.name }))),
-      wrap('Wohnfläche (m²)', feld('number', w.flaeche || '', v => updateWohnung(w.id, { flaeche: zahl(v) }), '0.01')),
-      wrap('Miteigentumsanteil', feld('number', w.mea || '', v => updateWohnung(w.id, { mea: zahl(v) }), '0.001')),
-      mk('label.inline-check', {}, [
-        mk('input', { type: 'checkbox', checked: w.selbstgenutzt || null, onchange: e => { updateWohnung(w.id, { selbstgenutzt: e.target.checked }); rerender(); } }),
-        tx('selbst bewohnt'),
-      ]),
-    ]);
-
-    const card = mk('div.card', {}, [kopf, stammdaten]);
-    if (w.selbstgenutzt) return card;
-
-    card.appendChild(mk('h3.miete-h3', { text: 'Mietverhältnisse' }));
-    if (!mvs.length) card.appendChild(mk('div.sub', { text: 'Noch kein Mietverhältnis. Ohne Mietverhältnis gilt die Wohnung als leer stehend.' }));
-    mvs.forEach(mv => card.appendChild(mietverhaeltnisBlock(mv)));
-    card.appendChild(neuesMietverhaeltnisForm(w));
-
-    card.appendChild(mk('h3.miete-h3', { text: `Zahlungen ${jahr}` }));
-    card.appendChild(monatsTabelle(w, mvs, jahr));
-    card.appendChild(zahlungsListe(mvs, jahr));
-    return card;
-  }
-
-  function mietverhaeltnisBlock(mv) {
-    const gesamt = (mv.kaltmiete || 0) + (mv.vorauszahlung || 0);
-    return mk('div.mv-block', {}, [
-      mk('div.row', {}, [
-        wrap('Mieter*in', feld('text', mv.mieter, v => updateMietverhaeltnis(mv.id, { mieter: v.trim() }))),
-        wrap('Von', feld('month', mv.von, v => updateMietverhaeltnis(mv.id, { von: v }))),
-        wrap('Bis (leer = läuft)', feld('month', mv.bis, v => updateMietverhaeltnis(mv.id, { bis: v }))),
-        wrap('Kaltmiete', feld('number', mv.kaltmiete || '', v => updateMietverhaeltnis(mv.id, { kaltmiete: zahl(v) }), '0.01')),
-        wrap('NK-Vorauszahlung', feld('number', mv.vorauszahlung || '', v => updateMietverhaeltnis(mv.id, { vorauszahlung: zahl(v) }), '0.01')),
-        mk('div.field', {}, [mk('label', { text: 'Gesamt / Monat' }), mk('div.mv-gesamt', { text: euro(gesamt) })]),
-      ]),
-      mk('div.row', {}, [
-        mk('div.field.mv-namen', {}, [
-          mk('label', { text: 'Namen auf dem Kontoauszug (mit Komma getrennt)' }),
-          feld('text', mv.zahlerNamen.join(', '), v => updateMietverhaeltnis(mv.id, { zahlerNamen: v.split(',').map(n => n.trim()).filter(Boolean) })),
-        ]),
-        mk('div.field', {}, [btn('Mietverhältnis löschen', () => {
-          if (confirm(`Mietverhältnis „${mv.mieter || 'ohne Namen'}“ löschen? Die Buchungen bleiben erhalten.`)) { deleteMietverhaeltnis(mv.id); rerender(); }
-        }, 'sm danger')]),
-      ]),
-    ]);
-  }
-
-  function neuesMietverhaeltnisForm(w) {
-    const mieter = mk('input', { type: 'text', placeholder: 'Name' });
-    const von = mk('input', { type: 'month', value: todayISO().slice(0, 7) });
-    const bis = mk('input', { type: 'month' });
-    const kalt = mk('input', { type: 'number', step: '0.01', placeholder: '€' });
-    const vz = mk('input', { type: 'number', step: '0.01', placeholder: '€' });
-    const namen = mk('input', { type: 'text', placeholder: 'wie auf dem Kontoauszug' });
-    const submit = btn('Mietverhältnis anlegen', () => {
-      if (!mieter.value.trim()) { mieter.focus(); return; }
-      if (!von.value) { von.focus(); return; }
-      const zahlerNamen = namen.value.split(',').map(n => n.trim()).filter(Boolean);
-      addMietverhaeltnis({
-        wohnungId: w.id, mieter: mieter.value.trim(), von: von.value, bis: bis.value,
-        kaltmiete: zahl(kalt.value), vorauszahlung: zahl(vz.value),
-        zahlerNamen: zahlerNamen.length ? zahlerNamen : [mieter.value.trim()],
-      });
-      rerender();
-    }, 'sm');
-    return mk('details.mv-neu', {}, [
-      mk('summary', { text: '+ Mietverhältnis hinzufügen' }),
-      mk('div.row', { style: 'margin-top:10px' }, [
-        wrap('Mieter*in', mieter), wrap('Von', von), wrap('Bis (leer = läuft)', bis),
-        wrap('Kaltmiete', kalt), wrap('NK-Vorauszahlung', vz),
-      ]),
-      mk('div.row', {}, [
-        mk('div.field.mv-namen', {}, [mk('label', { text: 'Namen auf dem Kontoauszug (mit Komma getrennt, leer = Name der Mieter*in)' }), namen]),
-        mk('div.field', {}, [submit]),
-      ]),
-    ]);
-  }
-
-  // Monat für Monat: Soll laut Mietverhältnis, Ist aus den zugeordneten
-  // Zahlungen. "davon NK" rechnet eine Zahlung zuerst auf die
-  // Vorauszahlung an (bis zur vereinbarten Höhe), der Rest ist Kaltmiete.
-  function monatsTabelle(w, mvs, jahr) {
-    const mvIds = new Set(mvs.map(mv => mv.id));
-    const zahlungen = mietEingaengeImJahr(jahr).filter(t => {
-      const mv = mietverhaeltnisFuerBuchung(t);
-      return mv && mvIds.has(mv.id);
-    });
-    const summe = { soll: 0, ist: 0, vzSoll: 0, vzIst: 0 };
-    const zeilen = monateDesJahres(jahr).map(monat => {
-      const mv = mvs.find(mv => mvLaeuftIm(mv, monat));
-      const soll = mv ? (mv.kaltmiete || 0) + (mv.vorauszahlung || 0) : 0;
-      const ist = zahlungen.filter(t => monthKey(t.datum) === monat).reduce((s, t) => s + t.betrag, 0);
-      const vzSoll = mv ? mv.vorauszahlung || 0 : 0;
-      const vzIst = mv ? Math.min(Math.max(ist, 0), vzSoll) : 0;
-      summe.soll += soll; summe.ist += ist; summe.vzSoll += vzSoll; summe.vzIst += vzIst;
-      const diff = ist - soll;
-      let status;
-      if (!mv) status = ist ? mk('span.badge.warn', { text: 'Zahlung bei Leerstand' }) : mk('span.badge', { text: 'Leerstand' });
-      else if (Math.abs(diff) < 0.01) status = mk('span.badge.ok', { text: 'bezahlt' });
-      else if (diff < 0) status = mk('span.badge.bad', { text: `${euro(-diff)} offen` });
-      else status = mk('span.badge.warn', { text: `${euro(diff)} zu viel` });
-      return mk('tr', {}, [
-        mk('td', { text: monthLabel(monat) }),
-        mk('td', { text: mv ? mv.mieter : '—' }),
-        mk('td.num', { text: euro(soll) }),
-        mk('td.num', { text: euro(ist) }),
-        mk('td.num', { text: euro(vzSoll) }),
-        mk('td.num', { text: euro(vzIst) }),
-        mk('td', {}, [status]),
-      ]);
-    });
+  // ── Tabellen ──
+  function monatsTabelle(monate, summe, jahr) {
     return mk('div.table-wrap', {}, [
       mk('table', {}, [
-        mk('tr', {}, ['Monat', 'Mieter*in', 'Soll', 'Ist', 'NK-VZ Soll', 'NK-VZ Ist', 'Status'].map(h => mk('th', { text: h }))),
-        ...zeilen,
+        mk('tr', {}, ['Monat', 'Mieter*in', 'Kaltmiete', 'Zahlung', 'davon NK', 'Status'].map(h => mk('th', { text: h }))),
+        ...monate.map(z => mk('tr', {}, [
+          mk('td', { text: monthLabel(z.monat) }),
+          mk('td', { text: z.mv ? z.mv.mieter : '—' }),
+          mk('td.num', { text: euro(z.kalt) }),
+          mk('td.num', { text: euro(z.ist) }),
+          mk('td.num', { text: euro(z.vzIst) }),
+          mk('td', {}, [statusBadge(z)]),
+        ])),
         mk('tr.jahr-zeile', {}, [
           mk('td', { text: `Summe ${jahr}` }), mk('td'),
-          mk('td.num', { text: euro(summe.soll) }), mk('td.num', { text: euro(summe.ist) }),
-          mk('td.num', { text: euro(summe.vzSoll) }), mk('td.num', { text: euro(summe.vzIst) }), mk('td'),
+          mk('td.num', { text: euro(summe.kalt) }), mk('td.num', { text: euro(summe.ist) }),
+          mk('td.num', { text: euro(summe.vzIst) }), mk('td'),
         ]),
       ]),
     ]);
   }
 
-  function zahlungsListe(mvs, jahr) {
-    const mvIds = new Set(mvs.map(mv => mv.id));
-    const zahlungen = mietEingaengeImJahr(jahr).filter(t => {
-      const mv = mietverhaeltnisFuerBuchung(t);
-      return mv && mvIds.has(mv.id);
-    });
-    return mk('details.mv-zahlungen', {}, [
-      mk('summary', { text: `Zugeordnete Zahlungen ${jahr} (${zahlungen.length})` }),
-      zahlungen.length ? buchungsTabelle(zahlungen) : mk('div.empty', { text: 'Keine zugeordneten Zahlungen.' }),
-    ]);
-  }
-
-  // ── Nicht zugeordnete Eingänge ──
   function nichtZugeordnetCard(jahr) {
     const eingaenge = mietEingaengeImJahr(jahr);
-    const offen = eingaenge.filter(t => t.mietZuordnung !== 'keine' && !mietverhaeltnisFuerBuchung(t));
+    const offenListe = eingaenge.filter(t => t.mietZuordnung !== 'keine' && !mietverhaeltnisFuerBuchung(t));
     const keine = eingaenge.filter(t => t.mietZuordnung === 'keine');
     return mk('div.card', {}, [
       mk('h2', { text: `Nicht zugeordnete Eingänge ${jahr}` }),
-      mk('div.sub', { text: 'Eingänge auf Mietkonten, deren Name zu keinem Mietverhältnis passt. Ergänze den Namen beim Mietverhältnis oder ordne die Zahlung hier von Hand zu.' }),
-      offen.length ? buchungsTabelle(offen) : mk('div.empty', { text: 'Alles zugeordnet.' }),
-      keine.length ? mk('details.mv-zahlungen', {}, [
-        mk('summary', { text: `Als „keine Mietzahlung“ markiert (${keine.length})` }),
-        buchungsTabelle(keine),
-      ]) : null,
+      mk('div.sub', { text: 'Eingänge auf Mietkonten, deren Name zu keinem Mietverhältnis passt. Trag den Namen beim Mietverhältnis ein oder wähle die Zuordnung hier von Hand.' }),
+      offenListe.length ? buchungsTabelle(offenListe) : mk('div.empty', { text: 'Alles zugeordnet.' }),
+      keine.length ? aufklappbar('keine', `Als „keine Mietzahlung“ markiert (${keine.length})`, [buchungsTabelle(keine)]) : null,
     ]);
   }
 
@@ -273,14 +379,6 @@
     const sel = mk('select', { onchange: e => { setMietZuordnung(t.id, e.target.value); rerender(); } }, optionen);
     sel.value = t.mietZuordnung || '';
     return sel;
-  }
-
-  // ── Helfer ──
-  function feld(type, value, onSave, step) {
-    return mk('input', {
-      type, value: value ?? '', step: step || null,
-      onchange: e => { onSave(e.target.value); rerender(); },
-    });
   }
 
   function wrap(label, input) {

@@ -161,12 +161,17 @@ label { font-size: 12px; font-weight: 600; color: var(--tx2); display: block; ma
 }
 
 /* Mietverwaltung */
-.miete-h3 { font-size: 13px; font-weight: 700; color: var(--tx2); margin: 18px 0 8px; text-transform: uppercase; letter-spacing: .04em; }
-.mv-block { border: 1px solid var(--bord); border-radius: 8px; padding: 12px 12px 0; margin-bottom: 10px; }
-.mv-block .field input[type="number"] { width: 110px; }
+.mv-anleitung summary, .mv-details summary { cursor: pointer; font-size: 13px; font-weight: 600; color: var(--pri); }
+.mv-anleitung ol { margin: 10px 0 8px 20px; font-size: 13px; line-height: 1.6; color: var(--tx); }
+.mv-details { margin-top: 12px; }
+.mv-jahr { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 8px 0 12px; font-size: 14px; font-weight: 600; }
+.mv-liste { border-top: 1px solid var(--surf2); padding-top: 4px; }
+.mv-zeile { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--surf2); }
+.mv-zeile-titel { font-size: 13px; font-weight: 700; color: var(--tx); margin-bottom: 6px; }
+.mv-zeile .mv-zeile-titel { margin-bottom: 2px; }
+.mv-zeile .sub { margin: 0; }
+.mv-block { border: 1px solid var(--bord); border-radius: 8px; padding: 12px 12px 0; margin: 8px 0; }
+.mv-betrag { width: 110px; }
 .mv-namen { flex: 1; min-width: 220px; }
 .mv-namen input { width: 100%; }
-.mv-gesamt { padding: 7px 0; font-weight: 700; font-variant-numeric: tabular-nums; }
-.mv-neu, .mv-zahlungen { margin-top: 10px; }
-.mv-neu summary, .mv-zahlungen summary { cursor: pointer; font-size: 13px; font-weight: 600; color: var(--pri); }
 .mv-beschreibung { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
