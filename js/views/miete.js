@@ -816,6 +816,9 @@
       bezeichnung: k.bezeichnung || 'Eigene Kosten', anteil: Math.round(eigeneKostenBetrag(k) * faktor * 100) / 100,
     }));
     if (!ea.eigeneKosten.some(k => /grundsteuer/i.test(k.bezeichnung))) hinweise.push('Die Grundsteuer ist noch nicht erfasst.');
+    if (umlagePositionen.some(p => p.betrag && (p.gesamtbetrag == null || !p.schluesselTyp))) {
+      hinweise.push('Bei einigen Positionen fehlen Gesamtbetrag oder Umlageschlüssel. Bitte die Eigentümerabrechnung neu aus der Datei importieren.');
+    }
 
     const gesamt = [...zeilen, ...eigene].reduce((s, z) => s + (z.anteil || 0), 0);
     const { monate: monatsZeilen } = monatsDaten(mvsWohnung, jahr);
@@ -841,7 +844,7 @@
       ${z.neueGruppe ? '<tr class="abstand"><td colspan="6"></td></tr>' : ''}
       <tr>
         <td>${esc(z.bezeichnung)}</td><td class="dp">:</td>
-        <td class="r">${z.gesamtbetrag == null ? 'entfällt €' : betrag(z.gesamtbetrag)}</td>
+        <td class="r">${z.gesamtbetrag != null ? betrag(z.gesamtbetrag) : z.anteil == null ? 'entfällt €' : ''}</td>
         <td class="c">${esc(z.typ)}</td><td class="c">${esc(z.schluessel)}</td>
         <td class="r">${z.anteil == null ? '' : betrag(z.anteil)}</td>
       </tr>`;
