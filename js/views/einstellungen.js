@@ -33,7 +33,7 @@
         root.appendChild(buildKonten());
         renderKontenZeitleiste(root);
       },
-      kategorien: () => root.appendChild(buildKategorienBaum()),
+      kategorien: () => { root.appendChild(buildKategorienBaum()); root.appendChild(buildKategorienBaum(true)); },
       regeln: () => {
         root.appendChild(buildAutomatisierungsregeln());
         root.appendChild(collapsibleCard('Empfänger zusammenführen', buildEmpfaengerZusammenfuehren));
@@ -87,7 +87,7 @@
     const stichwort = mk('input', { placeholder: 'z.B. Netflix' });
     const betragVon = mk('input', { type: 'number', step: '0.01', placeholder: 'z.B. -50' });
     const betragBis = mk('input', { type: 'number', step: '0.01', placeholder: 'z.B. -20' });
-    const kategorie = mk('select', {}, kategorieSelectOptions(getState().kategorien, ''));
+    const kategorie = mk('select', {}, kategorieSelectOptions(privateKategorien(), ''));
     const unterkategorie = mk('select', {}, unterkategorieSelectOptions('', ''));
     const tags = mk('input', { placeholder: 'z.B. wichtig, geschäftlich' });
     const status = mk('div');
@@ -168,7 +168,7 @@
   // Kategorie/Unterkategorie/Tags einer bestehenden Regel direkt in der
   // Tabelle änderbar, statt sie löschen und komplett neu anlegen zu müssen.
   function regelRow(r, refresh) {
-    const kategorie = mk('select', { style: 'min-width:150px' }, kategorieSelectOptions(getState().kategorien, r.kategorie));
+    const kategorie = mk('select', { style: 'min-width:150px' }, kategorieSelectOptions(privateKategorien(), r.kategorie));
     const unterkategorie = mk('select', { style: 'min-width:140px' }, unterkategorieSelectOptions(r.kategorie, r.unterkategorie));
     const tags = mk('input', { value: (r.tags || []).join(', '), style: 'min-width:130px' });
 
@@ -209,33 +209,54 @@
   // Kategorien und Unterkategorien in einem Baum statt zwei getrennten
   // Tabellen: pro Kategorie direkt sichtbar, welche Unterkategorien
   // dazugehören, und dort auch anlegbar/löschbar.
-  function buildKategorienBaum() {
-    const name = mk('input', { placeholder: 'Neue Kategorie' });
+  // miet = true: eigener Baum für die Kategorien der Mietkonten.
+  function buildKategorienBaum(miet = false) {
+    const name = mk('input', { placeholder: miet ? 'Neue Miet-Kategorie' : 'Neue Kategorie' });
     const treeHost = mk('div.kategorie-tree');
+    const meldung = mk('div.sub');
 
     const renderTree = () => {
       const state = getState();
-      const kategorien = state.kategorien;
+      const kategorien = miet ? mietKategorienListe() : privateKategorien();
       treeHost.replaceChildren(
         kategorien.length
           ? mk('div', {}, kategorien.map(k => kategorieNode(k, state.unterkategorien.filter(u => u.kategorie === k), renderTree)))
-          : mk('div.empty', { text: 'Noch keine Kategorien angelegt.' })
+          : mk('div.empty', { text: miet ? 'Noch keine Miet-Kategorien angelegt.' : 'Noch keine Kategorien angelegt.' })
       );
     };
     renderTree();
 
-    return mk('div.card', {}, [
-      mk('h2', { text: 'Kategorien & Unterkategorien' }),
-      mk('div.sub', { text: 'Feste Liste, aus der du überall auswählst — verhindert unterschiedliche Schreibweisen. Unterkategorien gehören direkt zu ihrer Kategorie, z.B. Lebensmittel → Restaurant/Supermarkt.' }),
+    const anlegen = () => {
+      if (!name.value.trim()) return;
+      meldung.textContent = '';
+      if (miet) {
+        if (addMietKategorie(name.value) === null) {
+          meldung.textContent = `„${name.value.trim()}“ gibt es schon als private Kategorie. Bitte einen anderen Namen wählen, z.B. „${name.value.trim()} Wohnung“.`;
+          return;
+        }
+      } else if (istMietKategorie(name.value)) {
+        meldung.textContent = `„${name.value.trim()}“ gibt es schon als Miet-Kategorie.`;
+        return;
+      } else {
+        addKategorie(name.value);
+      }
+      name.value = '';
+      renderTree();
+    };
+    name.addEventListener('keydown', event => { if (event.key === 'Enter') anlegen(); });
+
+    return mk('div.card', { style: miet ? 'margin-top:16px' : null }, [
+      mk('h2', { text: miet ? 'Kategorien für Mietkonten' : 'Kategorien & Unterkategorien' }),
+      mk('div.sub', {
+        text: miet
+          ? 'Gelten nur für Buchungen auf Konten mit dem Typ „Mietkonto“, z.B. Hausgeld, Grundsteuer, Reparaturen. Dort stehen nur diese Kategorien zur Auswahl.'
+          : 'Feste Liste, aus der du überall auswählst — verhindert unterschiedliche Schreibweisen. Unterkategorien gehören direkt zu ihrer Kategorie, z.B. Lebensmittel → Restaurant/Supermarkt. Gilt für alle Konten außer Mietkonten.',
+      }),
       mk('div.row', {}, [
-        wrap('Neue Kategorie', name),
-        btn('Anlegen', () => {
-          if (!name.value.trim()) return;
-          addKategorie(name.value);
-          name.value = '';
-          renderTree();
-        }, 'sm'),
+        wrap(miet ? 'Neue Miet-Kategorie' : 'Neue Kategorie', name),
+        btn('Anlegen', anlegen, 'sm'),
       ]),
+      meldung,
       treeHost,
     ]);
   }

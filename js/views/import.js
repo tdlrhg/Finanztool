@@ -277,7 +277,7 @@
           }
         }
 
-        const regelTreffer = kategorieUndTagsFuerBuchung({ empfaenger, beschreibung, betrag });
+        const regelTreffer = kategorieUndTagsFuerBuchung({ empfaenger, beschreibung, betrag, kontoId });
         const regelKategorie = regelTreffer ? regelTreffer.kategorie : '';
         // Nur übernehmen, wenn die von der Bank mitgelieferte Kategorie exakt
         // (bis auf Groß-/Kleinschreibung) einer bereits vorhandenen eigenen

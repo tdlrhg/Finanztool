@@ -545,7 +545,7 @@
   }
 
   function kategorieOptionenLokal(currentValue) {
-    const kategorien = getState().kategorien;
+    const kategorien = privateKategorien();
     return [
       mk('option', { value: '', text: '(egal)', selected: !currentValue }),
       ...kategorien.map(k => mk('option', { value: k, text: k, selected: currentValue === k })),

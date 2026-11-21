@@ -15,6 +15,8 @@
       eigentuemerabrechnungen: [], // {id, wohnungId, jahr: 'YYYY', summeLautAbrechnung, positionen: [{id, nr, bezeichnung, schluessel, betrag, umlagefaehig}], eigeneKosten: [{id, bezeichnung, betrag, umlagefaehig, buchungIds: []}], heizkosten: [{id, nutzer: mvId|'leerstand', gesamt, co2Vermieter}]}
       mietverhaeltnisse: [], // {id, wohnungId, mieter, von: 'YYYY-MM', bis: 'YYYY-MM'|'', kaltmiete, kaltmieteAenderungen: [{ab: 'YYYY-MM', betrag}], vorauszahlung, zahlerNamen: []}
       kategorien: [],    // verwaltete Liste der Kategorienamen
+      mietKategorien: [], // Teilmenge von kategorien, die nur für Buchungen auf Mietkonten gilt
+      mietKategorienBereinigt: false, // einmalige Bereinigung alter Kategorien auf Mietkonten erledigt
       unterkategorien: [], // {id, kategorie, name} – hängen jeweils an einer Kategorie
       empfaengerAliase: [], // {id, alias, kanonisch} – Schreibweise-Varianten (z.B. verschiedener Bank-Exporte) auf einen Namen zusammengeführt
       einnahmenZeilen: [], // {id, label, kategorie, unterkategorie, empfaenger} – frei konfigurierte Zeilen für die Einnahmen-Tabelle
@@ -104,6 +106,22 @@
     normalized.ausgabenZeilen = Array.isArray(normalized.ausgabenZeilen) ? normalized.ausgabenZeilen : [];
     normalized.ausgabenSonstigeDeaktiviert = !!normalized.ausgabenSonstigeDeaktiviert;
     normalized.kategorien = Array.isArray(normalized.kategorien) ? normalized.kategorien : [];
+    normalized.mietKategorien = Array.isArray(normalized.mietKategorien) ? normalized.mietKategorien : [];
+    // Einmalig: Buchungen auf Mietkonten verlieren ihre bisherigen (privaten)
+    // Kategorien, damit sie mit den neuen Miet-Kategorien neu zugeordnet
+    // werden können.
+    if (!normalized.mietKategorienBereinigt) {
+      const mietKontoIds = new Set(normalized.konten.filter(k => k.typ === 'miete').map(k => k.id));
+      const mietKeys = new Set(normalized.mietKategorien.map(normalizeKategorieKey));
+      normalized.transaktionen.forEach(t => {
+        if (!mietKontoIds.has(t.kontoId)) return;
+        if (t.kategorie && !mietKeys.has(normalizeKategorieKey(t.kategorie))) { t.kategorie = ''; t.unterkategorie = ''; t.kategorieQuelle = ''; }
+        (t.detailPositionen || []).forEach(item => {
+          if (item.kategorie && !mietKeys.has(normalizeKategorieKey(item.kategorie))) { item.kategorie = ''; item.unterkategorie = ''; item.kategorieQuelle = ''; }
+        });
+      });
+      normalized.mietKategorienBereinigt = true;
+    }
     if (!normalized.kategorien.length) {
       // Migration: verwaltete Liste aus bereits vorhandenen Kategorien befüllen
       const seen = new Set();
@@ -202,6 +220,7 @@
     t.unterkategorie = canonicalUnterkategorie(t.kategorie, t.unterkategorie);
     t.tags = normalizeTags(t.tags);
     t.detailPositionen = normalizeDetailPositionen(t.detailPositionen);
+    passendeKategorienErzwingen(t);
     state.transaktionen.push(t);
     save();
     return t;
@@ -226,12 +245,50 @@
         t.kategorieQuelle = '';
         t.unterkategorie = '';
       }
+      passendeKategorienErzwingen(t);
     }
     save();
   }
   function deleteTransaktion(id) {
     state.transaktionen = state.transaktionen.filter(t => t.id !== id);
     save();
+  }
+
+  // ── Miet-Kategorien ──
+  // Buchungen auf Mietkonten haben nur Miet-Kategorien, alle anderen nur
+  // private Kategorien. Unpassende Kategorien werden entfernt.
+  function istMietKonto(kontoId) {
+    return state.konten.some(k => k.id === kontoId && k.typ === 'miete');
+  }
+  function istMietKategorie(kategorie) {
+    const key = normalizeKategorieKey(kategorie);
+    return !!key && state.mietKategorien.some(k => normalizeKategorieKey(k) === key);
+  }
+  function privateKategorien() {
+    return state.kategorien.filter(k => !istMietKategorie(k));
+  }
+  function mietKategorienListe() {
+    return state.kategorien.filter(k => istMietKategorie(k));
+  }
+  function passendeKategorienErzwingen(t) {
+    const miet = istMietKonto(t.kontoId);
+    const passt = k => !k || istMietKategorie(k) === miet;
+    if (!passt(t.kategorie)) { t.kategorie = ''; t.unterkategorie = ''; t.kategorieQuelle = ''; }
+    (t.detailPositionen || []).forEach(item => {
+      if (!passt(item.kategorie)) { item.kategorie = ''; item.unterkategorie = ''; item.kategorieQuelle = ''; }
+    });
+  }
+  function addMietKategorie(name) {
+    const trimmed = (name || '').trim().replace(/\s+/g, ' ');
+    if (!trimmed) return '';
+    const key = normalizeKategorieKey(trimmed);
+    // Gleicher Name wie eine private Kategorie ist nicht möglich (eine
+    // gemeinsame Namensliste); dann bewusst nichts anlegen.
+    if (state.kategorien.some(k => normalizeKategorieKey(k) === key) && !istMietKategorie(trimmed)) return null;
+    const kategorie = canonicalKategorie(trimmed);
+    if (!istMietKategorie(kategorie)) state.mietKategorien.push(kategorie);
+    save();
+    return kategorie;
   }
 
   function istTransfer(t) {
@@ -468,6 +525,8 @@
   // Prüft eine Buchung (oder eine noch nicht gespeicherte, aber gleich
   // aufgebaute CSV-Zeile) gegen alle Automatisierungsregeln.
   function kategorieUndTagsFuerBuchung(buchung) {
+    // Regeln gelten (vorerst) nicht für Buchungen auf Mietkonten.
+    if (buchung && istMietKonto(buchung.kontoId)) return null;
     // Eine Regel ohne Kategorie (z.B. Altlast) darf eine spätere, passende
     // Regel mit Kategorie nicht verdecken.
     const treffer = state.regeln.filter(r => regelTrifftZu(r, buchung));
@@ -538,6 +597,7 @@
   function deleteKategorie(name) {
     const key = normalizeKategorieKey(name);
     state.kategorien = state.kategorien.filter(k => normalizeKategorieKey(k) !== key);
+    state.mietKategorien = state.mietKategorien.filter(k => normalizeKategorieKey(k) !== key);
     state.unterkategorien = state.unterkategorien.filter(u => normalizeKategorieKey(u.kategorie) !== key);
     state.transaktionen.forEach(t => {
       if (normalizeKategorieKey(t.kategorie) === key) { t.kategorie = ''; t.kategorieQuelle = ''; t.unterkategorie = ''; }
@@ -855,6 +915,11 @@
   window.applyRegelnToTransactions = applyRegelnToTransactions;
   window.addKategorie = addKategorie;
   window.findKategorie = findKategorie;
+  window.istMietKonto = istMietKonto;
+  window.istMietKategorie = istMietKategorie;
+  window.privateKategorien = privateKategorien;
+  window.mietKategorienListe = mietKategorienListe;
+  window.addMietKategorie = addMietKategorie;
   window.deleteKategorie = deleteKategorie;
   window.unterkategorienFuer = unterkategorienFuer;
   window.addUnterkategorie = addUnterkategorie;

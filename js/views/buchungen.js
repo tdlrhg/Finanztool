@@ -133,9 +133,13 @@
     const konto = mk('select', {}, state.konten.map(k => mk('option', { value: k.id, text: k.name })));
     const betrag = mk('input', { type: 'number', step: '0.01', placeholder: 'Betrag' });
     const empfaenger = mk('input', { placeholder: 'Empfänger' });
-    const kategorie = mk('select', {}, kategorieOptions(''));
+    const kategorie = mk('select', {}, kategorieOptions('', istMietKonto(konto.value)));
     const unterkategorie = mk('select', {}, unterkategorieOptions('', ''));
     const tags = mk('input', { placeholder: 'Tags' });
+    konto.addEventListener('change', () => {
+      kategorie.replaceChildren(...kategorieOptions('', istMietKonto(konto.value)));
+      unterkategorie.replaceChildren(...unterkategorieOptions('', ''));
+    });
     const beschreibung = mk('input', { placeholder: 'Beschreibung' });
     const status = mk('div');
 
@@ -690,7 +694,7 @@
   function categoryInput(t, update) {
     if (istTransfer(t)) return mk('span.muted', { text: 'Transfer' });
     if ((t.detailPositionen || []).length) return mk('span.muted', { text: 'siehe Positionen' });
-    const select = mk('select.cell-input', {}, kategorieOptions(t.kategorie));
+    const select = mk('select.cell-input', {}, kategorieOptions(t.kategorie, istMietKonto(t.kontoId)));
     select.addEventListener('change', () => {
       updateTransaktion(t.id, { kategorie: select.value, kategorieQuelle: 'manuell' });
       update(t.id);
@@ -698,8 +702,9 @@
     return select;
   }
 
-  function kategorieOptions(currentValue) {
-    const kategorien = getState().kategorien;
+  // miet = true: nur Miet-Kategorien (Buchungen auf Mietkonten), sonst nur private.
+  function kategorieOptions(currentValue, miet = false) {
+    const kategorien = miet ? mietKategorienListe() : privateKategorien();
     const options = (!currentValue || kategorien.includes(currentValue) ? kategorien : [currentValue, ...kategorien])
       .slice()
       .sort((a, b) => a.localeCompare(b, 'de', { sensitivity: 'base' }));
@@ -849,7 +854,7 @@
     // Komma-Format via parseAmountInput/formatAmountInput) und hat keine
     // verwirrenden Auf/Ab-Pfeile für einen Geldbetrag.
     const betrag = mk('input.cell-input', { placeholder: 'z.B. -12,50', inputmode: 'decimal' });
-    const kategorie = mk('select.cell-input', {}, kategorieOptions(''));
+    const kategorie = mk('select.cell-input', {}, kategorieOptions('', istMietKonto(parent.kontoId)));
     const unterkategorie = mk('select.cell-input', {}, unterkategorieOptions('', ''));
     const summe = (parent.detailPositionen || []).reduce((sum, item) => sum + item.betrag, 0);
     const restEl = mk('td.muted', { text: restText(parent, summe) });
@@ -955,7 +960,7 @@
   }
 
   function detailCategoryInput(parent, item, refresh) {
-    const select = mk('select.cell-input', {}, kategorieOptions(item.kategorie));
+    const select = mk('select.cell-input', {}, kategorieOptions(item.kategorie, istMietKonto(parent.kontoId)));
     select.addEventListener('change', () => {
       updateDetailPosition(parent, item.id, { kategorie: select.value, unterkategorie: '', kategorieQuelle: 'manuell' });
       refresh();
