@@ -845,7 +845,10 @@
       const d = ende ? new Date(y, m, 0).getDate() : 1;
       return `${String(d).padStart(2, '0')}.${String(m).padStart(2, '0')}.${y}`;
     };
-    const mieter = (mv.mieter || '').split(',')[0].trim();
+    // Vor- und Nachname, damit gleiche Nachnamen unterscheidbar sind;
+    // "Nachname, Vorname" wird zu "Vorname Nachname".
+    const [nachname, ...vorn] = (mv.mieter || '').split(',').map(x => x.trim());
+    const mieter = vorn.length ? `${vorn.join(' ')} ${nachname}` : nachname;
     const zeile = z => `
       ${z.neueGruppe ? '<tr class="abstand"><td colspan="6"></td></tr>' : ''}
       <tr>
