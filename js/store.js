@@ -12,6 +12,7 @@
       sparziele: [],     // {id, name, zielbetrag, aktuellerBetrag, zieldatum, notiz}
       mietobjekte: [],   // {id, name, mieterName, sollMiete, kontoId, beginn, notizen} – altes Modell, wird nicht mehr angezeigt
       wohnungen: [],     // {id, name, flaeche, mea, selbstgenutzt}
+      eigentuemerabrechnungen: [], // {id, wohnungId, jahr: 'YYYY', summeLautAbrechnung, positionen: [{id, nr, bezeichnung, schluessel, betrag, umlagefaehig}]}
       mietverhaeltnisse: [], // {id, wohnungId, mieter, von: 'YYYY-MM', bis: 'YYYY-MM'|'', kaltmiete, vorauszahlung, zahlerNamen: []}
       kategorien: [],    // verwaltete Liste der Kategorienamen
       unterkategorien: [], // {id, kategorie, name} – hängen jeweils an einer Kategorie
@@ -68,6 +69,9 @@
     normalized.sparziele = Array.isArray(normalized.sparziele) ? normalized.sparziele : [];
     normalized.mietobjekte = Array.isArray(normalized.mietobjekte) ? normalized.mietobjekte : [];
     normalized.wohnungen = Array.isArray(normalized.wohnungen) ? normalized.wohnungen : [];
+    normalized.eigentuemerabrechnungen = Array.isArray(normalized.eigentuemerabrechnungen)
+      ? normalized.eigentuemerabrechnungen.map(ea => ({ summeLautAbrechnung: null, ...ea, positionen: Array.isArray(ea.positionen) ? ea.positionen : [] }))
+      : [];
     normalized.mietverhaeltnisse = Array.isArray(normalized.mietverhaeltnisse)
       ? normalized.mietverhaeltnisse.map(mv => ({ mieter: '', von: '', bis: '', kaltmiete: 0, vorauszahlung: 0, ...mv, zahlerNamen: Array.isArray(mv.zahlerNamen) ? mv.zahlerNamen : [] }))
       : [];
@@ -671,7 +675,29 @@
     const mvIds = new Set(state.mietverhaeltnisse.filter(mv => mv.wohnungId === id).map(mv => mv.id));
     state.wohnungen = state.wohnungen.filter(w => w.id !== id);
     state.mietverhaeltnisse = state.mietverhaeltnisse.filter(mv => !mvIds.has(mv.id));
+    state.eigentuemerabrechnungen = state.eigentuemerabrechnungen.filter(ea => ea.wohnungId !== id);
     state.transaktionen.forEach(t => { if (mvIds.has(t.mietZuordnung)) t.mietZuordnung = ''; });
+    save();
+  }
+
+  // ── Eigentümerabrechnungen (eine je Wohnung und Jahr) ──
+  function eigentuemerabrechnungFuer(wohnungId, jahr) {
+    return state.eigentuemerabrechnungen.find(ea => ea.wohnungId === wohnungId && ea.jahr === String(jahr)) || null;
+  }
+  // Legt die Abrechnung an oder ersetzt eine vorhandene für Wohnung + Jahr.
+  function speichereEigentuemerabrechnung(data) {
+    const vorhanden = eigentuemerabrechnungFuer(data.wohnungId, data.jahr);
+    const ea = {
+      id: vorhanden?.id || uid(), summeLautAbrechnung: null, ...data, jahr: String(data.jahr),
+      positionen: (data.positionen || []).map(p => ({ id: p.id || uid(), nr: '', bezeichnung: '', schluessel: '', betrag: 0, umlagefaehig: false, ...p })),
+    };
+    state.eigentuemerabrechnungen = state.eigentuemerabrechnungen.filter(x => x.id !== ea.id);
+    state.eigentuemerabrechnungen.push(ea);
+    save();
+    return ea;
+  }
+  function deleteEigentuemerabrechnung(id) {
+    state.eigentuemerabrechnungen = state.eigentuemerabrechnungen.filter(ea => ea.id !== id);
     save();
   }
   function addMietverhaeltnis(data) {
@@ -815,6 +841,9 @@
   window.updateWohnung = updateWohnung;
   window.deleteWohnung = deleteWohnung;
   window.addMietverhaeltnis = addMietverhaeltnis;
+  window.eigentuemerabrechnungFuer = eigentuemerabrechnungFuer;
+  window.speichereEigentuemerabrechnung = speichereEigentuemerabrechnung;
+  window.deleteEigentuemerabrechnung = deleteEigentuemerabrechnung;
   window.updateMietverhaeltnis = updateMietverhaeltnis;
   window.deleteMietverhaeltnis = deleteMietverhaeltnis;
   window.setMietZuordnung = setMietZuordnung;

@@ -185,7 +185,7 @@
       ]));
       if (stamm) card.appendChild(mk('div.sub', { text: stamm }));
     }
-    if (w.selbstgenutzt) return card;
+    if (w.selbstgenutzt) { card.appendChild(eaZeile(w, jahr)); return card; }
 
     const { monate, summe, zugeordnet } = monatsDaten(mvs, jahr);
     card.appendChild(jahresZeile(mvs, summe, jahr));
@@ -199,6 +199,7 @@
     card.appendChild(liste);
     const nk = nkAbrechnungsBlock(mvs);
     if (nk) card.appendChild(nk);
+    card.appendChild(eaZeile(w, jahr));
 
     card.appendChild(aufklappbar(`monate:${w.id}`, `Monate ${jahr} anzeigen`, [monatsTabelle(monate, summe, jahr)]));
     card.appendChild(aufklappbar(`zahlungen:${w.id}`, `Zugeordnete Zahlungen ${jahr} (${zugeordnet.length})`,
@@ -425,6 +426,146 @@
     }, optionen);
     sel.value = t.mietZuordnung && t.mietZuordnung !== 'keine' && t.mietNkJahr ? `${t.mietZuordnung}|${t.mietNkJahr}` : (t.mietZuordnung || '');
     return sel;
+  }
+
+  // ── Eigentümerabrechnung ──
+  // In der Karte nur eine Zeile; Erfassen und Bearbeiten im Overlay.
+  function eaSummen(ea) {
+    const summe = ea.positionen.reduce((s, p) => s + (p.betrag || 0), 0);
+    const umlage = ea.positionen.filter(p => p.umlagefaehig).reduce((s, p) => s + (p.betrag || 0), 0);
+    const abweichung = ea.summeLautAbrechnung != null && ea.summeLautAbrechnung !== '' ? summe - ea.summeLautAbrechnung : null;
+    return { summe, umlage, nichtUmlage: summe - umlage, abweichung };
+  }
+
+  function eaZeile(w, jahr) {
+    const ea = eigentuemerabrechnungFuer(w.id, jahr);
+    const oeffnen = () => openModal(box => eaModalInhalt(box, w, jahr));
+    if (!ea) {
+      return mk('div.mv-ea', {}, [
+        mk('span', { text: `Eigentümerabrechnung ${jahr}: noch nicht erfasst` }),
+        btn('Erfassen', oeffnen, 'sm sec'),
+      ]);
+    }
+    const z = eaSummen(ea);
+    return mk('div.mv-ea', {}, [
+      mk('span', {}, [
+        tx(`Eigentümerabrechnung ${jahr}: ${euro(z.summe)} · davon umlagefähig `),
+        mk('strong', { text: euro(z.umlage) }),
+        z.abweichung != null && Math.abs(z.abweichung) > 0.009 ? mk('span.badge.bad', { text: `weicht ${euro(z.abweichung)} ab`, style: 'margin-left:8px' }) : null,
+      ]),
+      btn('Öffnen', oeffnen, 'sm sec'),
+    ]);
+  }
+
+  function eaModalInhalt(box, w, jahr) {
+    const neuZeichnen = () => { box.replaceChildren(); eaModalInhalt(box, w, jahr); };
+    const ea = eigentuemerabrechnungFuer(w.id, jahr);
+    box.appendChild(mk('h2', { text: `Eigentümerabrechnung ${jahr} · ${w.name}` }));
+
+    const datei = mk('input', { type: 'file', accept: '.json,application/json', style: 'display:none' });
+    datei.addEventListener('change', async () => {
+      const f = datei.files[0];
+      if (!f) return;
+      try {
+        const daten = JSON.parse(await f.text());
+        if (!Array.isArray(daten.positionen)) throw new Error('Keine Positionen in der Datei.');
+        if (daten.jahr && String(daten.jahr) !== String(jahr) && !confirm(`Die Datei ist für ${daten.jahr}, eingestellt ist ${jahr}. Trotzdem für ${jahr} übernehmen?`)) return;
+        if (ea && !confirm('Die vorhandenen Positionen werden ersetzt. Fortfahren?')) return;
+        speichereEigentuemerabrechnung({
+          wohnungId: w.id, jahr,
+          summeLautAbrechnung: daten.summeLautAbrechnung ?? null,
+          positionen: daten.positionen.map(p => ({ nr: String(p.nr ?? ''), bezeichnung: p.bezeichnung || '', schluessel: p.schluessel || '', betrag: zahl(p.betrag), umlagefaehig: !!p.umlagefaehig })),
+        });
+        neuZeichnen();
+      } catch (e) {
+        alert(`Die Datei konnte nicht gelesen werden: ${e.message}`);
+      }
+    });
+
+    const vorjahr = eigentuemerabrechnungFuer(w.id, String(+jahr - 1));
+    const werkzeuge = mk('div.row', { style: 'margin:8px 0 14px' }, [
+      datei,
+      btn('Aus Datei importieren', () => datei.click(), 'sm sec'),
+      vorjahr && !ea ? btn(`Positionen aus ${+jahr - 1} übernehmen`, () => {
+        speichereEigentuemerabrechnung({
+          wohnungId: w.id, jahr, summeLautAbrechnung: null,
+          positionen: vorjahr.positionen.map(p => ({ nr: p.nr, bezeichnung: p.bezeichnung, schluessel: p.schluessel, betrag: 0, umlagefaehig: p.umlagefaehig })),
+        });
+        neuZeichnen();
+      }, 'sm sec') : null,
+      !ea ? btn('Leer anlegen', () => { speichereEigentuemerabrechnung({ wohnungId: w.id, jahr, positionen: [] }); neuZeichnen(); }, 'sm sec') : null,
+    ]);
+    box.appendChild(werkzeuge);
+    if (!ea) {
+      box.appendChild(mk('div.sub', { text: 'Importiere die Datei, die Claude aus deiner Abrechnung erzeugt hat, oder lege die Abrechnung leer an und trag die Positionen selbst ein.' }));
+      return;
+    }
+
+    // Änderungen sofort speichern; Summen neu zeichnen, ohne dass das
+    // gerade bearbeitete Feld den Fokus verliert.
+    const speichern = () => { speichereEigentuemerabrechnung(ea); fussAktualisieren(); };
+    const zeile = p => mk('tr', {}, [
+      mk('td', {}, [mk('input.ea-nr', { type: 'text', value: p.nr, onchange: e => { p.nr = e.target.value.trim(); speichern(); } })]),
+      mk('td', {}, [mk('input.cell-input', { type: 'text', value: p.bezeichnung, onchange: e => { p.bezeichnung = e.target.value.trim(); speichern(); } })]),
+      mk('td', {}, [mk('input.cell-input', { type: 'text', value: p.schluessel, onchange: e => { p.schluessel = e.target.value.trim(); speichern(); } })]),
+      mk('td', {}, [mk('input.mv-betrag', { type: 'text', inputmode: 'decimal', value: zahlText(p.betrag), onchange: e => { p.betrag = zahl(e.target.value); speichern(); } })]),
+      mk('td', { style: 'text-align:center' }, [mk('input', { type: 'checkbox', checked: p.umlagefaehig || null, onchange: e => { p.umlagefaehig = e.target.checked; speichern(); } })]),
+      mk('td', {}, [btn('✕', () => { ea.positionen = ea.positionen.filter(x => x !== p); speichern(); neuZeichnen(); }, 'sm sec')]),
+    ]);
+    box.appendChild(mk('div.table-wrap', {}, [
+      mk('table.ea-tabelle', {}, [
+        mk('tr', {}, ['Pos', 'Kostenstelle', 'Schlüssel', 'Ihr Anteil €', 'umlagefähig', ''].map(h => mk('th', { text: h }))),
+        ...ea.positionen.map(zeile),
+      ]),
+    ]));
+    box.appendChild(mk('div.row', { style: 'margin-top:8px' }, [
+      btn('+ Position', () => { ea.positionen.push({ nr: '', bezeichnung: '', schluessel: '', betrag: 0, umlagefaehig: true }); speichern(); neuZeichnen(); }, 'sm sec'),
+    ]));
+
+    const sollFeld = mk('input.mv-betrag', {
+      type: 'text', inputmode: 'decimal', value: ea.summeLautAbrechnung != null ? zahlText(ea.summeLautAbrechnung) : '',
+      onchange: e => { ea.summeLautAbrechnung = e.target.value.trim() ? zahl(e.target.value) : null; speichern(); },
+    });
+    const fuss = mk('div.ea-fuss');
+    function fussAktualisieren() {
+      const z = eaSummen(ea);
+      fuss.replaceChildren(
+        mk('div', {}, [tx('Summe: '), mk('strong', { text: euro(z.summe) })]),
+        mk('div', {}, [tx('davon umlagefähig: '), mk('strong.pos', { text: euro(z.umlage) })]),
+        mk('div', {}, [tx('nicht umlagefähig: '), mk('strong', { text: euro(z.nichtUmlage) })]),
+        z.abweichung == null ? mk('span.badge', { text: 'Kontrollsumme fehlt' })
+          : Math.abs(z.abweichung) < 0.01 ? mk('span.badge.ok', { text: 'stimmt mit der Abrechnung überein' })
+            : mk('span.badge.bad', { text: `Abweichung ${euro(z.abweichung)}` }),
+      );
+    }
+    fussAktualisieren();
+    box.appendChild(mk('div.row', { style: 'margin-top:16px' }, [
+      wrap('„Ihr Anteil an den Betriebskosten“ laut Abrechnung', sollFeld),
+    ]));
+    box.appendChild(fuss);
+    box.appendChild(mk('div.row', { style: 'margin-top:16px' }, [
+      btn('Abrechnung löschen', () => {
+        if (confirm(`Eigentümerabrechnung ${jahr} für „${w.name}“ löschen?`)) { deleteEigentuemerabrechnung(ea.id); neuZeichnen(); }
+      }, 'sm danger'),
+    ]));
+  }
+
+  // Overlay; beim Schließen wird die Seite dahinter neu gezeichnet.
+  function openModal(baue) {
+    const inhalt = mk('div');
+    const backdrop = mk('div.modal-backdrop', {}, [
+      mk('div.modal-card', {}, [
+        mk('button.btn.sm.sec.icon-btn.modal-close', { 'aria-label': 'Schließen' }, [mk('span', { text: '✕' })]),
+        inhalt,
+      ]),
+    ]);
+    document.body.appendChild(backdrop);
+    const close = () => { backdrop.remove(); document.removeEventListener('keydown', esc); rerender(); };
+    const esc = e => { if (e.key === 'Escape') close(); };
+    document.addEventListener('keydown', esc);
+    backdrop.addEventListener('click', e => { if (e.target === backdrop) close(); });
+    backdrop.querySelector('.modal-close').addEventListener('click', close);
+    baue(inhalt);
   }
 
   function wrap(label, input) {

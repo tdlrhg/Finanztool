@@ -179,3 +179,8 @@ label { font-size: 12px; font-weight: 600; color: var(--tx2); display: block; ma
 .mv-nk-zeile { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 12px; font-size: 13px; padding: 4px 0; border-bottom: 1px solid var(--surf2); }
 .mv-nk-zeile .pos { color: var(--grn); font-weight: 600; }
 .mv-nk-zeile .neg { color: var(--red); font-weight: 600; }
+.mv-ea { display: flex; justify-content: space-between; align-items: center; gap: 12px; font-size: 13px; padding: 8px 0; border-top: 1px solid var(--surf2); }
+.ea-tabelle td { padding: 3px 4px; }
+.ea-nr { width: 44px; }
+.ea-fuss { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 20px; font-size: 13px; padding: 10px 0; border-top: 1px solid var(--bord); }
+.ea-fuss .pos { color: var(--grn); }
