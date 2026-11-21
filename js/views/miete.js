@@ -13,6 +13,8 @@
   // 'neu:<wohnungId>' für ein neues Mietverhältnis).
   const offen = new Set();
   let bearbeite = null;
+  let buchungsAuswahl = null; // eigene Kostenposition, für die gerade Buchungen gewählt werden ('neu' = neue Grundsteuer)
+  let alleAusgabenZeigen = false;
 
   function ladeJahr() {
     try { return localStorage.getItem(JAHR_KEY) || ''; } catch (e) { return ''; }
@@ -430,11 +432,15 @@
 
   // ── Eigentümerabrechnung ──
   // In der Karte nur eine Zeile; Erfassen und Bearbeiten im Overlay.
+  // summe/umlage/abweichung: nur Verwalterabrechnung (Kontrolle gegen die
+  // Abrechnung). eigene/umlageGesamt: zusätzlich eigene Kosten (Grundsteuer).
   function eaSummen(ea) {
     const summe = ea.positionen.reduce((s, p) => s + (p.betrag || 0), 0);
     const umlage = ea.positionen.filter(p => p.umlagefaehig).reduce((s, p) => s + (p.betrag || 0), 0);
     const abweichung = ea.summeLautAbrechnung != null && ea.summeLautAbrechnung !== '' ? summe - ea.summeLautAbrechnung : null;
-    return { summe, umlage, nichtUmlage: summe - umlage, abweichung };
+    const eigene = ea.eigeneKosten.reduce((s, k) => s + eigeneKostenBetrag(k), 0);
+    const eigeneUmlage = ea.eigeneKosten.filter(k => k.umlagefaehig).reduce((s, k) => s + eigeneKostenBetrag(k), 0);
+    return { summe, umlage, nichtUmlage: summe - umlage, abweichung, eigene, umlageGesamt: umlage + eigeneUmlage };
   }
 
   function eaZeile(w, jahr) {
@@ -449,8 +455,11 @@
     const z = eaSummen(ea);
     return mk('div.mv-ea', {}, [
       mk('span', {}, [
-        tx(`Eigentümerabrechnung ${jahr}: ${euro(z.summe)} · davon umlagefähig `),
-        mk('strong', { text: euro(z.umlage) }),
+        tx(`Eigentümerabrechnung ${jahr}: ${euro(z.summe)}`),
+        z.eigene ? tx(` · eigene Kosten ${euro(z.eigene)}`) : null,
+        tx(' · umlagefähig '),
+        mk('strong', { text: euro(z.umlageGesamt) }),
+        !ea.eigeneKosten.length ? mk('span.badge.warn', { text: 'Grundsteuer fehlt', style: 'margin-left:8px' }) : null,
         z.abweichung != null && Math.abs(z.abweichung) > 0.009 ? mk('span.badge.bad', { text: `weicht ${euro(z.abweichung)} ab`, style: 'margin-left:8px' }) : null,
       ]),
       btn('Öffnen', oeffnen, 'sm sec'),
@@ -543,11 +552,115 @@
       wrap('„Ihr Anteil an den Betriebskosten“ laut Abrechnung', sollFeld),
     ]));
     box.appendChild(fuss);
+    box.appendChild(eigeneKostenBlock(ea, w, jahr, speichern, neuZeichnen));
     box.appendChild(mk('div.row', { style: 'margin-top:16px' }, [
       btn('Abrechnung löschen', () => {
         if (confirm(`Eigentümerabrechnung ${jahr} für „${w.name}“ löschen?`)) { deleteEigentuemerabrechnung(ea.id); neuZeichnen(); }
       }, 'sm danger'),
     ]));
+  }
+
+  // ── Eigene Kosten (z.B. Grundsteuer) im Overlay ──
+  const GRUNDSTEUER = /grundsteuer|grundbesitzabgabe/i;
+
+  function eigeneKostenBlock(ea, w, jahr, speichern, neuZeichnen) {
+    const block = mk('div.ea-eigene', {}, [
+      mk('h3.miete-h3', { text: 'Eigene Kosten' }),
+      mk('div.sub', { text: 'Kosten, die nicht über die Verwaltung laufen, z.B. die Grundsteuer. Sie zählen nicht zur Kontrollsumme oben.' }),
+    ]);
+    const zeilen = ea.eigeneKosten.map(k => {
+      const verknuepft = k.buchungIds.length > 0;
+      return mk('tr', {}, [
+        mk('td', {}, [mk('input.cell-input', { type: 'text', value: k.bezeichnung, onchange: e => { k.bezeichnung = e.target.value.trim(); speichern(); } })]),
+        mk('td', {}, [verknuepft
+          ? mk('span', { text: `${euro(eigeneKostenBetrag(k))} aus ${k.buchungIds.length} ${k.buchungIds.length === 1 ? 'Buchung' : 'Buchungen'}` })
+          : mk('input.mv-betrag', { type: 'text', inputmode: 'decimal', value: zahlText(k.betrag), onchange: e => { k.betrag = zahl(e.target.value); speichern(); neuZeichnen(); } })]),
+        mk('td', { style: 'text-align:center' }, [mk('input', { type: 'checkbox', checked: k.umlagefaehig || null, onchange: e => { k.umlagefaehig = e.target.checked; speichern(); neuZeichnen(); } })]),
+        mk('td', {}, [
+          btn('Buchungen wählen', () => { buchungsAuswahl = k.id; neuZeichnen(); }, 'sm sec'),
+          tx(' '),
+          btn('✕', () => { ea.eigeneKosten = ea.eigeneKosten.filter(x => x !== k); speichern(); neuZeichnen(); }, 'sm sec'),
+        ]),
+      ]);
+    });
+    if (zeilen.length) {
+      block.appendChild(mk('div.table-wrap', {}, [mk('table.ea-tabelle', {}, [
+        mk('tr', {}, ['Kostenart', 'Betrag', 'umlagefähig', ''].map(h => mk('th', { text: h }))),
+        ...zeilen,
+      ])]));
+    }
+    block.appendChild(mk('div.row', { style: 'margin-top:8px' }, [
+      !ea.eigeneKosten.some(k => /grundsteuer/i.test(k.bezeichnung))
+        ? btn('+ Grundsteuer aus dem Mietkonto', () => { buchungsAuswahl = 'neu'; neuZeichnen(); }, 'sm') : null,
+      btn('+ Eigene Position', () => { ea.eigeneKosten.push({ bezeichnung: '', betrag: 0, umlagefaehig: true, buchungIds: [] }); speichern(); neuZeichnen(); }, 'sm sec'),
+    ]));
+    if (buchungsAuswahl) block.appendChild(buchungsAuswahlBlock(ea, w, jahr, speichern, neuZeichnen));
+    const z = eaSummen(ea);
+    block.appendChild(mk('div.ea-fuss', {}, [
+      mk('div', {}, [tx('Umlagefähig gesamt (Verwaltung + eigene Kosten): '), mk('strong.pos', { text: euro(z.umlageGesamt) })]),
+    ]));
+    return block;
+  }
+
+  // Ausgaben der Mietkonten im Jahr zum Ankreuzen. Standard: nur Buchungen
+  // mit "Grundsteuer" im Text. Buchungen, die schon bei einer anderen
+  // Wohnung verknüpft sind, werden gekennzeichnet.
+  function buchungsAuswahlBlock(ea, w, jahr, speichern, neuZeichnen) {
+    const state = getState();
+    const k = buchungsAuswahl === 'neu' ? null : ea.eigeneKosten.find(x => x.id === buchungsAuswahl);
+    const gewaehlt = new Set(k ? k.buchungIds : []);
+    const vergebenAn = new Map();
+    state.eigentuemerabrechnungen.forEach(andere => andere.eigeneKosten.forEach(x => {
+      if (x === k) return;
+      const wo = state.wohnungen.find(ww => ww.id === andere.wohnungId);
+      x.buchungIds.forEach(id => vergebenAn.set(id, wo ? wo.name : '?'));
+    }));
+    const ausgaben = state.transaktionen
+      .filter(t => (t.datum || '').startsWith(jahr) && t.betrag < 0 && istMietBuchung(t))
+      .sort((a, b) => (a.datum < b.datum ? -1 : 1));
+    const treffer = ausgaben.filter(t => GRUNDSTEUER.test(`${t.empfaenger || ''} ${t.beschreibung || ''}`));
+    const liste = alleAusgabenZeigen ? ausgaben : treffer;
+
+    const haken = new Map();
+    const zeilen = liste.map(t => {
+      const cb = mk('input', { type: 'checkbox', checked: gewaehlt.has(t.id) || null });
+      haken.set(t.id, cb);
+      return mk('tr', {}, [
+        mk('td', {}, [cb]),
+        mk('td', { text: fmtDate(t.datum) }),
+        mk('td', { text: t.empfaenger || '' }),
+        mk('td.mv-beschreibung', { text: t.beschreibung || '', title: t.beschreibung || '' }),
+        mk('td.num', { text: euro(Math.abs(t.betrag)) }),
+        mk('td', {}, [vergebenAn.has(t.id) ? mk('span.badge.warn', { text: `bei ${vergebenAn.get(t.id)}` }) : null]),
+      ]);
+    });
+
+    const uebernehmen = btn('Übernehmen', () => {
+      const ids = [...haken].filter(([, cb]) => cb.checked).map(([id]) => id);
+      // Nicht angezeigte, aber bereits gewählte Buchungen bleiben erhalten.
+      const unsichtbar = [...gewaehlt].filter(id => !haken.has(id));
+      const alle = [...unsichtbar, ...ids];
+      if (k) k.buchungIds = alle;
+      else ea.eigeneKosten.push({ bezeichnung: 'Grundsteuer', betrag: 0, umlagefaehig: true, buchungIds: alle });
+      buchungsAuswahl = null;
+      speichern();
+      neuZeichnen();
+    }, 'sm');
+
+    return mk('div.ea-auswahl', {}, [
+      mk('div.mv-zeile-titel', { text: `Ausgaben vom Mietkonto ${jahr}: Zahlungen für ${w.name} ankreuzen` }),
+      mk('label.inline-check', {}, [
+        mk('input', { type: 'checkbox', checked: alleAusgabenZeigen || null, onchange: e => { alleAusgabenZeigen = e.target.checked; neuZeichnen(); } }),
+        tx('alle Ausgaben zeigen, nicht nur „Grundsteuer“'),
+      ]),
+      zeilen.length
+        ? mk('div.table-wrap', {}, [mk('table', {}, [
+            mk('tr', {}, ['', 'Datum', 'Empfänger', 'Beschreibung', 'Betrag', ''].map(h => mk('th', { text: h }))),
+            ...zeilen,
+          ])])
+        : mk('div.empty', { text: alleAusgabenZeigen ? `Keine Ausgaben auf Mietkonten in ${jahr}.` : `Keine Buchung mit „Grundsteuer“ im Text in ${jahr}. Häkchen oben setzen, um alle Ausgaben zu sehen.` }),
+      mk('div.row', { style: 'margin-top:8px' }, [uebernehmen, btn('Abbrechen', () => { buchungsAuswahl = null; neuZeichnen(); }, 'sm sec')]),
+    ]);
   }
 
   // Overlay; beim Schließen wird die Seite dahinter neu gezeichnet.
@@ -560,7 +673,7 @@
       ]),
     ]);
     document.body.appendChild(backdrop);
-    const close = () => { backdrop.remove(); document.removeEventListener('keydown', esc); rerender(); };
+    const close = () => { buchungsAuswahl = null; backdrop.remove(); document.removeEventListener('keydown', esc); rerender(); };
     const esc = e => { if (e.key === 'Escape') close(); };
     document.addEventListener('keydown', esc);
     backdrop.addEventListener('click', e => { if (e.target === backdrop) close(); });

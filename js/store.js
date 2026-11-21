@@ -12,7 +12,7 @@
       sparziele: [],     // {id, name, zielbetrag, aktuellerBetrag, zieldatum, notiz}
       mietobjekte: [],   // {id, name, mieterName, sollMiete, kontoId, beginn, notizen} – altes Modell, wird nicht mehr angezeigt
       wohnungen: [],     // {id, name, flaeche, mea, selbstgenutzt}
-      eigentuemerabrechnungen: [], // {id, wohnungId, jahr: 'YYYY', summeLautAbrechnung, positionen: [{id, nr, bezeichnung, schluessel, betrag, umlagefaehig}]}
+      eigentuemerabrechnungen: [], // {id, wohnungId, jahr: 'YYYY', summeLautAbrechnung, positionen: [{id, nr, bezeichnung, schluessel, betrag, umlagefaehig}], eigeneKosten: [{id, bezeichnung, betrag, umlagefaehig, buchungIds: []}]}
       mietverhaeltnisse: [], // {id, wohnungId, mieter, von: 'YYYY-MM', bis: 'YYYY-MM'|'', kaltmiete, vorauszahlung, zahlerNamen: []}
       kategorien: [],    // verwaltete Liste der Kategorienamen
       unterkategorien: [], // {id, kategorie, name} – hängen jeweils an einer Kategorie
@@ -70,7 +70,11 @@
     normalized.mietobjekte = Array.isArray(normalized.mietobjekte) ? normalized.mietobjekte : [];
     normalized.wohnungen = Array.isArray(normalized.wohnungen) ? normalized.wohnungen : [];
     normalized.eigentuemerabrechnungen = Array.isArray(normalized.eigentuemerabrechnungen)
-      ? normalized.eigentuemerabrechnungen.map(ea => ({ summeLautAbrechnung: null, ...ea, positionen: Array.isArray(ea.positionen) ? ea.positionen : [] }))
+      ? normalized.eigentuemerabrechnungen.map(ea => ({
+          summeLautAbrechnung: null, ...ea,
+          positionen: Array.isArray(ea.positionen) ? ea.positionen : [],
+          eigeneKosten: Array.isArray(ea.eigeneKosten) ? ea.eigeneKosten.map(k => ({ ...k, buchungIds: Array.isArray(k.buchungIds) ? k.buchungIds : [] })) : [],
+        }))
       : [];
     normalized.mietverhaeltnisse = Array.isArray(normalized.mietverhaeltnisse)
       ? normalized.mietverhaeltnisse.map(mv => ({ mieter: '', von: '', bis: '', kaltmiete: 0, vorauszahlung: 0, ...mv, zahlerNamen: Array.isArray(mv.zahlerNamen) ? mv.zahlerNamen : [] }))
@@ -690,11 +694,20 @@
     const ea = {
       id: vorhanden?.id || uid(), summeLautAbrechnung: null, ...data, jahr: String(data.jahr),
       positionen: (data.positionen || []).map(p => ({ id: p.id || uid(), nr: '', bezeichnung: '', schluessel: '', betrag: 0, umlagefaehig: false, ...p })),
+      // Eigene Kosten (z.B. Grundsteuer) gehören nicht zur Verwalterabrechnung
+      // und bleiben beim Ersetzen der Positionen (Import) erhalten.
+      eigeneKosten: (data.eigeneKosten || vorhanden?.eigeneKosten || []).map(k => ({ id: k.id || uid(), bezeichnung: '', betrag: 0, umlagefaehig: true, ...k, buchungIds: Array.isArray(k.buchungIds) ? k.buchungIds : [] })),
     };
     state.eigentuemerabrechnungen = state.eigentuemerabrechnungen.filter(x => x.id !== ea.id);
     state.eigentuemerabrechnungen.push(ea);
     save();
     return ea;
+  }
+  // Betrag einer eigenen Kostenposition: mit verknüpften Buchungen die
+  // Summe dieser Zahlungen, sonst der eingetragene Betrag.
+  function eigeneKostenBetrag(k) {
+    if (!k.buchungIds?.length) return k.betrag || 0;
+    return state.transaktionen.filter(t => k.buchungIds.includes(t.id)).reduce((s, t) => s + Math.abs(t.betrag), 0);
   }
   function deleteEigentuemerabrechnung(id) {
     state.eigentuemerabrechnungen = state.eigentuemerabrechnungen.filter(ea => ea.id !== id);
@@ -844,6 +857,7 @@
   window.eigentuemerabrechnungFuer = eigentuemerabrechnungFuer;
   window.speichereEigentuemerabrechnung = speichereEigentuemerabrechnung;
   window.deleteEigentuemerabrechnung = deleteEigentuemerabrechnung;
+  window.eigeneKostenBetrag = eigeneKostenBetrag;
   window.updateMietverhaeltnis = updateMietverhaeltnis;
   window.deleteMietverhaeltnis = deleteMietverhaeltnis;
   window.setMietZuordnung = setMietZuordnung;

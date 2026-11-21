@@ -184,3 +184,5 @@ label { font-size: 12px; font-weight: 600; color: var(--tx2); display: block; ma
 .ea-nr { width: 44px; }
 .ea-fuss { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 20px; font-size: 13px; padding: 10px 0; border-top: 1px solid var(--bord); }
 .ea-fuss .pos { color: var(--grn); }
+.ea-eigene { margin-top: 18px; border-top: 1px solid var(--bord); }
+.ea-auswahl { margin-top: 12px; padding: 12px; border: 1px solid var(--bord); border-radius: 8px; background: var(--surf2); }
