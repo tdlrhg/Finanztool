@@ -195,7 +195,7 @@
     // Mietverhältnisse als Textzeilen, Bearbeiten öffnet das Formular.
     const liste = mk('div.mv-liste');
     if (!mvs.length) liste.appendChild(mk('div.sub', { text: 'Noch kein Mietverhältnis. Ohne Mietverhältnis gilt die Wohnung als leer stehend.' }));
-    mvs.forEach(mv => liste.appendChild(bearbeite === mv.id ? mietverhaeltnisFormular(mv, w) : mietverhaeltnisZeile(mv)));
+    mvs.forEach(mv => liste.appendChild(bearbeite === mv.id ? mietverhaeltnisFormular(mv, w) : mietverhaeltnisZeile(mv, jahr)));
     if (bearbeite === 'neu:' + w.id) liste.appendChild(mietverhaeltnisFormular(null, w));
     else liste.appendChild(mk('div', { style: 'margin-top:8px' }, [btn('+ Mietverhältnis hinzufügen', () => { bearbeite = 'neu:' + w.id; rerender(); }, 'sm sec')]));
     card.appendChild(liste);
@@ -225,7 +225,8 @@
     return mk('div.mv-jahr', {}, teile);
   }
 
-  function mietverhaeltnisZeile(mv) {
+  function mietverhaeltnisZeile(mv, jahr) {
+    const abrechenbar = monateDesJahres(jahr).some(m => mvLaeuftIm(mv, m)) && eigentuemerabrechnungFuer(mv.wohnungId, jahr);
     const aenderungen = (mv.kaltmieteAenderungen || []).filter(a => a.ab).sort((a, b) => (a.ab < b.ab ? -1 : 1));
     const kaltText = aenderungen.length
       ? [`${euro(mv.kaltmiete)} kalt`, ...aenderungen.map(a => `ab ${monthLabel(a.ab)} ${euro(a.betrag)}`)].join(' · ')
@@ -241,7 +242,10 @@
           tx(` · Namen: ${mv.zahlerNamen.length ? mv.zahlerNamen.join(', ') : '—'}`),
         ]),
       ]),
-      btn('Bearbeiten', () => { bearbeite = mv.id; rerender(); }, 'sm sec'),
+      mk('div.mv-knoepfe', {}, [
+        abrechenbar ? btn(`Abrechnung ${jahr}`, () => druckeNkAbrechnung(mv, jahr), 'sm') : null,
+        btn('Bearbeiten', () => { bearbeite = mv.id; rerender(); }, 'sm sec'),
+      ]),
     ]);
   }
 
@@ -324,16 +328,20 @@
     const flaeche = eingabe(w.flaeche, 'm²', 'betrag');
     const mea = eingabe(w.mea, 'z.B. 125,5', 'betrag');
     const selbst = mk('input', { type: 'checkbox', checked: w.selbstgenutzt || null });
+    const titel = mk('input', { type: 'text', value: w.abrechnungsTitel || '', placeholder: 'z.B. Musterstraße 1, Whg. II in Musterstadt' });
     return mk('div', {}, [
       mk('h2', { text: 'Wohnung bearbeiten' }),
       mk('div.row', {}, [
         wrap('Name', name), wrap('Wohnfläche (m²)', flaeche), wrap('Miteigentumsanteil', mea),
         mk('label.inline-check', {}, [selbst, tx('selbst bewohnt')]),
       ]),
+      mk('div.row', {}, [
+        mk('div.field.mv-namen', {}, [mk('label', { text: 'Überschrift in der Nebenkostenabrechnung (Adresse und Wohnung)' }), titel]),
+      ]),
       mk('div.row', { style: 'margin-bottom:12px' }, [
         btn('Speichern', () => {
           if (!name.value.trim()) { name.focus(); return; }
-          updateWohnung(w.id, { name: name.value.trim(), flaeche: zahl(flaeche.value), mea: zahl(mea.value), selbstgenutzt: selbst.checked });
+          updateWohnung(w.id, { name: name.value.trim(), flaeche: zahl(flaeche.value), mea: zahl(mea.value), selbstgenutzt: selbst.checked, abrechnungsTitel: titel.value.trim() });
           bearbeite = null;
           rerender();
         }, 'sm'),
@@ -523,7 +531,12 @@
         speichereEigentuemerabrechnung({
           wohnungId: w.id, jahr,
           summeLautAbrechnung: daten.summeLautAbrechnung ?? null,
-          positionen: daten.positionen.map(p => ({ nr: String(p.nr ?? ''), bezeichnung: p.bezeichnung || '', schluessel: p.schluessel || '', betrag: zahl(p.betrag), umlagefaehig: !!p.umlagefaehig })),
+          positionen: daten.positionen.map(p => ({
+            nr: String(p.nr ?? ''), bezeichnung: p.bezeichnung || '', schluessel: p.schluessel || '',
+            schluesselTyp: p.schluesselTyp || '', schluesselAnteil: p.schluesselAnteil || '',
+            gesamtbetrag: p.gesamtbetrag == null ? null : zahl(p.gesamtbetrag),
+            betrag: zahl(p.betrag), umlagefaehig: !!p.umlagefaehig,
+          })),
         });
         neuZeichnen();
       } catch (e) {
@@ -755,6 +768,151 @@
         : mk('div.empty', { text: alleAusgabenZeigen ? `Keine Ausgaben auf Mietkonten in ${jahr}.` : `Keine Buchung mit „Grundsteuer“ im Text in ${jahr}. Häkchen oben setzen, um alle Ausgaben zu sehen.` }),
       mk('div.row', { style: 'margin-top:8px' }, [uebernehmen, btn('Abbrechen', () => { buchungsAuswahl = null; neuZeichnen(); }, 'sm sec')]),
     ]);
+  }
+
+  // ── Nebenkostenabrechnung für eine*n Mieter*in ──
+  // Umlagefähige Positionen der Eigentümerabrechnung, anteilig nach
+  // Mietmonaten im Jahr. Ausnahmen: Punkte (Personen × gewohnte Monate)
+  // enthalten die Monate schon und werden nicht gekürzt – außer es gab im
+  // Jahr mehrere Mietverhältnisse; Heizung kommt aus "Heizkosten laut A&S".
+  // Abzüglich der tatsächlich gezahlten Vorauszahlungen vom Mietkonto.
+  function nkAbrechnung(mv, jahr) {
+    const ea = eigentuemerabrechnungFuer(mv.wohnungId, jahr);
+    const mvsWohnung = getState().mietverhaeltnisse.filter(x => x.wohnungId === mv.wohnungId);
+    const monate = monateDesJahres(jahr).filter(m => mvLaeuftIm(mv, m));
+    const faktor = monate.length / 12;
+    const mehrereMieter = mvsWohnung.filter(x => monateDesJahres(jahr).some(m => mvLaeuftIm(x, m))).length > 1;
+    const hinweise = [];
+    const heizEintrag = ea.heizkosten.find(h => h.nutzer === mv.id);
+
+    const umlagePositionen = ea.positionen.filter(p => p.umlagefaehig)
+      .sort((a, b) => (parseInt(a.nr, 10) || 0) - (parseInt(b.nr, 10) || 0));
+    let vorherNr = null;
+    const zeilen = umlagePositionen.map(p => {
+      const nr = parseInt(p.nr, 10);
+      const neueGruppe = vorherNr != null && Number.isFinite(nr) && nr - vorherNr > 1;
+      vorherNr = Number.isFinite(nr) ? nr : vorherNr;
+      const istHeizung = p.schluesselTyp === 'Zähl.' || /heiz/i.test(p.bezeichnung);
+      let anteil;
+      if (!p.betrag) anteil = null;
+      else if (istHeizung && ea.heizkosten.length) {
+        if (heizEintrag) anteil = (heizEintrag.gesamt || 0) - (heizEintrag.co2Vermieter || 0);
+        else { anteil = p.betrag * faktor; hinweise.push('Für diese*n Mieter*in fehlt die Zeile in „Heizkosten laut A&S“. Die Heizung ist nach Monaten gerechnet.'); }
+      } else if (istHeizung) {
+        anteil = p.betrag * faktor;
+        hinweise.push('„Heizkosten laut A&S“ sind nicht erfasst. Die Heizung ist ohne CO2-Abzug nach Monaten gerechnet.');
+      } else if (p.schluesselTyp === 'Punkte' && !mehrereMieter) anteil = p.betrag;
+      else anteil = p.betrag * faktor;
+      if (p.schluesselTyp === 'Punkte' && mehrereMieter && p.betrag) {
+        hinweise.push('Mehrere Mietverhältnisse im Jahr: Die Punkte-Positionen sind nach Monaten aufgeteilt. Bitte prüfen.');
+      }
+      return {
+        bezeichnung: p.bezeichnung, gesamtbetrag: p.gesamtbetrag ?? null,
+        typ: p.schluesselTyp || '', schluessel: p.schluesselAnteil || (p.schluesselTyp ? '' : p.schluessel || ''),
+        anteil: anteil == null ? null : Math.round(anteil * 100) / 100, neueGruppe,
+      };
+    });
+    const eigene = ea.eigeneKosten.filter(k => k.umlagefaehig).map(k => ({
+      bezeichnung: k.bezeichnung || 'Eigene Kosten', anteil: Math.round(eigeneKostenBetrag(k) * faktor * 100) / 100,
+    }));
+    if (!ea.eigeneKosten.some(k => /grundsteuer/i.test(k.bezeichnung))) hinweise.push('Die Grundsteuer ist noch nicht erfasst.');
+
+    const gesamt = [...zeilen, ...eigene].reduce((s, z) => s + (z.anteil || 0), 0);
+    const { monate: monatsZeilen } = monatsDaten(mvsWohnung, jahr);
+    const vorauszahlungen = monatsZeilen.filter(z => z.mv === mv).reduce((s, z) => s + z.vzIst, 0);
+    return {
+      mv, jahr, ea, zeilen, eigene, gesamt, vorauszahlungen, ergebnis: vorauszahlungen - gesamt,
+      von: monate[0], bis: monate.at(-1), hinweise: [...new Set(hinweise)],
+    };
+  }
+
+  function druckeNkAbrechnung(mv, jahr) {
+    const w = getState().wohnungen.find(x => x.id === mv.wohnungId);
+    const a = nkAbrechnung(mv, jahr);
+    const esc = v => String(v ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+    const betrag = n => `${(Math.round(n * 100) / 100).toFixed(2).replace('.', ',')} €`;
+    const tag = (monat, ende) => {
+      const [y, m] = monat.split('-').map(Number);
+      const d = ende ? new Date(y, m, 0).getDate() : 1;
+      return `${String(d).padStart(2, '0')}.${String(m).padStart(2, '0')}.${y}`;
+    };
+    const mieter = (mv.mieter || '').split(',')[0].trim();
+    const zeile = z => `
+      ${z.neueGruppe ? '<tr class="abstand"><td colspan="6"></td></tr>' : ''}
+      <tr>
+        <td>${esc(z.bezeichnung)}</td><td class="dp">:</td>
+        <td class="r">${z.gesamtbetrag == null ? 'entfällt €' : betrag(z.gesamtbetrag)}</td>
+        <td class="c">${esc(z.typ)}</td><td class="c">${esc(z.schluessel)}</td>
+        <td class="r">${z.anteil == null ? '' : betrag(z.anteil)}</td>
+      </tr>`;
+    const eigeneZeile = z => `
+      <tr class="abstand"><td colspan="6"></td></tr>
+      <tr><td>${esc(z.bezeichnung)}</td><td class="dp">:</td><td></td><td></td><td></td><td class="r">${betrag(z.anteil)}</td></tr>`;
+    const ergebnisText = a.ergebnis >= 0 ? 'Guthaben' : 'Nachzahlung';
+
+    const html = `<!doctype html><html lang="de"><head><meta charset="utf-8">
+<title>NK-Abr. ${esc(jahr)} ${esc(mieter)}</title>
+<style>
+  body { font-family: Tahoma, Verdana, Geneva, sans-serif; font-size: 10.5pt; color: #000; background: #fff; margin: 0; }
+  .seite { width: 180mm; margin: 0 auto; padding: 20mm 0; }
+  h1 { text-align: center; font-size: 13pt; margin: 0; }
+  .jahr { text-align: center; font-size: 18pt; font-weight: bold; margin: 2px 0; }
+  .objekt { text-align: center; font-weight: bold; font-size: 10pt; margin-bottom: 28px; }
+  .kasten { border: 1px solid #000; padding: 2px 8px; }
+  .kasten.titel { text-align: center; margin-bottom: 14px; }
+  .daten td { padding: 1px 0; vertical-align: top; }
+  .daten td:first-child { width: 62mm; } .daten td:nth-child(2) { width: 10mm; text-align: center; }
+  .schluessel { display: flex; justify-content: space-between; margin: 10px 0 30px; padding: 4px 8px; }
+  .schluessel table td { padding: 0 3px; } .schluessel table td:first-child { text-align: right; }
+  table.kosten { width: 100%; border-collapse: collapse; }
+  table.kosten th { font-weight: normal; border: 1px solid #000; padding: 2px; }
+  table.kosten td { padding: 1px 2px; white-space: nowrap; }
+  .dp { width: 6mm; text-align: center; } .r { text-align: right; } .c { text-align: center; }
+  tr.abstand td { height: 12px; }
+  tr.summe td { font-weight: bold; padding-top: 14px; }
+  .hinweise { background: #fff4d6; border: 1px solid #e0b84c; padding: 8px 12px; margin: 12px auto; width: 180mm; font-family: sans-serif; font-size: 10pt; }
+  .knoepfe { width: 180mm; margin: 12px auto 0; font-family: sans-serif; }
+  .knoepfe button { font-size: 11pt; padding: 6px 14px; cursor: pointer; }
+  @media print { .hinweise, .knoepfe { display: none; } .seite { padding: 0; } @page { size: A4; margin: 20mm 15mm; } }
+</style></head><body>
+<div class="knoepfe"><button onclick="window.print()">Drucken / als PDF speichern</button></div>
+${a.hinweise.length ? `<div class="hinweise"><strong>Bitte prüfen (wird nicht gedruckt):</strong><ul>${a.hinweise.map(h => `<li>${esc(h)}</li>`).join('')}</ul></div>` : ''}
+<div class="seite">
+  <h1>Abrechnung für das Wirtschaftsjahr</h1>
+  <div class="jahr">${esc(jahr)}</div>
+  <div class="objekt">${esc(w.abrechnungsTitel || w.name)}</div>
+  <div class="kasten titel">Allgemeine Daten</div>
+  <table class="daten">
+    <tr><td>Mieter</td><td>:</td><td>${esc(mieter)}</td></tr>
+    <tr><td>Abgerechneter Zeitraum</td><td>:</td><td><strong>${tag(a.von)} – ${tag(a.bis, true)}</strong></td></tr>
+  </table>
+  <div class="kasten schluessel">
+    <strong>Umlageschlüsselbezeichnung</strong>
+    <table>
+      <tr><td>Part.</td><td>= Parteien</td></tr>
+      <tr><td>Zähl.</td><td>= Zähler</td></tr>
+      <tr><td>Punkte</td><td>= Personen x gewohnte Monate</td></tr>
+      <tr><td>qm</td><td>= Quadratmeter Wohnung</td></tr>
+      <tr><td>WA</td><td>= Wohnanteil</td></tr>
+    </table>
+  </div>
+  <table class="kosten">
+    <tr><th colspan="3">Ausgaben</th><th colspan="2">Umlageschlüssel</th><th>Ihr Anteil</th></tr>
+    <tr class="abstand"><td colspan="6"></td></tr>
+    ${a.zeilen.map(zeile).join('')}
+    ${a.eigene.map(eigeneZeile).join('')}
+    <tr class="summe"><td>Gesamt</td><td class="dp">:</td><td></td><td></td><td></td><td class="r">${betrag(a.gesamt)}</td></tr>
+    <tr class="abstand"><td colspan="6"></td></tr>
+    <tr><td colspan="5">Vorauszahlungen wurden angerechnet in Höhe von:</td><td class="r">${betrag(a.vorauszahlungen)}</td></tr>
+    <tr class="summe"><td>${ergebnisText}</td><td class="dp">:</td><td></td><td></td><td></td><td class="r">${betrag(Math.abs(a.ergebnis))}</td></tr>
+  </table>
+</div>
+</body></html>`;
+    const fenster = window.open('', '_blank');
+    if (!fenster) { alert('Das neue Fenster wurde blockiert. Bitte Pop-ups für diese Seite erlauben.'); return; }
+    fenster.document.open();
+    fenster.document.write(html);
+    fenster.document.close();
   }
 
   // Overlay; beim Schließen wird die Seite dahinter neu gezeichnet.
