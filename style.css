@@ -159,3 +159,14 @@ label { font-size: 12px; font-weight: 600; color: var(--tx2); display: block; ma
   .sb-item { flex-shrink: 0; }
   .content { padding: 14px; }
 }
+
+/* Mietverwaltung */
+.miete-h3 { font-size: 13px; font-weight: 700; color: var(--tx2); margin: 18px 0 8px; text-transform: uppercase; letter-spacing: .04em; }
+.mv-block { border: 1px solid var(--bord); border-radius: 8px; padding: 12px 12px 0; margin-bottom: 10px; }
+.mv-block .field input[type="number"] { width: 110px; }
+.mv-namen { flex: 1; min-width: 220px; }
+.mv-namen input { width: 100%; }
+.mv-gesamt { padding: 7px 0; font-weight: 700; font-variant-numeric: tabular-nums; }
+.mv-neu, .mv-zahlungen { margin-top: 10px; }
+.mv-neu summary, .mv-zahlungen summary { cursor: pointer; font-size: 13px; font-weight: 600; color: var(--pri); }
+.mv-beschreibung { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

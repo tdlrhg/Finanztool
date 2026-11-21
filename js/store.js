@@ -10,7 +10,9 @@
       regeln: [],        // {id, empfaenger, stichwort, betragVon, betragBis, kategorie, tags} – erweiterte Automatisierungsregeln
       budgets: [],       // {id, kategorie, limit}
       sparziele: [],     // {id, name, zielbetrag, aktuellerBetrag, zieldatum, notiz}
-      mietobjekte: [],   // {id, name, mieterName, sollMiete, kontoId, beginn, notizen}
+      mietobjekte: [],   // {id, name, mieterName, sollMiete, kontoId, beginn, notizen} – altes Modell, wird nicht mehr angezeigt
+      wohnungen: [],     // {id, name, flaeche, mea, selbstgenutzt}
+      mietverhaeltnisse: [], // {id, wohnungId, mieter, von: 'YYYY-MM', bis: 'YYYY-MM'|'', kaltmiete, vorauszahlung, zahlerNamen: []}
       kategorien: [],    // verwaltete Liste der Kategorienamen
       unterkategorien: [], // {id, kategorie, name} – hängen jeweils an einer Kategorie
       empfaengerAliase: [], // {id, alias, kanonisch} – Schreibweise-Varianten (z.B. verschiedener Bank-Exporte) auf einen Namen zusammengeführt
@@ -55,6 +57,7 @@
           unterkategorie: '',
           detailPositionen: [],
           ausAuswertung: false,
+          mietZuordnung: '',
           ...t,
           tags: normalizeTags(t.tags),
           detailPositionen: normalizeDetailPositionen(t.detailPositionen),
@@ -63,6 +66,10 @@
     normalized.budgets = Array.isArray(normalized.budgets) ? normalized.budgets : [];
     normalized.sparziele = Array.isArray(normalized.sparziele) ? normalized.sparziele : [];
     normalized.mietobjekte = Array.isArray(normalized.mietobjekte) ? normalized.mietobjekte : [];
+    normalized.wohnungen = Array.isArray(normalized.wohnungen) ? normalized.wohnungen : [];
+    normalized.mietverhaeltnisse = Array.isArray(normalized.mietverhaeltnisse)
+      ? normalized.mietverhaeltnisse.map(mv => ({ mieter: '', von: '', bis: '', kaltmiete: 0, vorauszahlung: 0, ...mv, zahlerNamen: Array.isArray(mv.zahlerNamen) ? mv.zahlerNamen : [] }))
+      : [];
     // Alte "Empfänger-Kategorien" (vor der Umstellung auf Automatisierungsregeln)
     // nur noch lokal für die Migration unten verwenden — der Zustand selbst
     // behält dieses Feld nicht mehr (auch die "Detailimport nötig"-Markierung
@@ -647,6 +654,74 @@
     save();
   }
 
+  // ── Wohnungen und Mietverhältnisse ──
+  function addWohnung(data) {
+    const w = { id: uid(), name: '', flaeche: 0, mea: 0, selbstgenutzt: false, ...data };
+    state.wohnungen.push(w);
+    save();
+    return w;
+  }
+  function updateWohnung(id, patch) {
+    const w = state.wohnungen.find(w => w.id === id);
+    if (w) Object.assign(w, patch);
+    save();
+  }
+  function deleteWohnung(id) {
+    const mvIds = new Set(state.mietverhaeltnisse.filter(mv => mv.wohnungId === id).map(mv => mv.id));
+    state.wohnungen = state.wohnungen.filter(w => w.id !== id);
+    state.mietverhaeltnisse = state.mietverhaeltnisse.filter(mv => !mvIds.has(mv.id));
+    state.transaktionen.forEach(t => { if (mvIds.has(t.mietZuordnung)) t.mietZuordnung = ''; });
+    save();
+  }
+  function addMietverhaeltnis(data) {
+    const mv = { id: uid(), wohnungId: '', mieter: '', von: todayISO().slice(0, 7), bis: '', kaltmiete: 0, vorauszahlung: 0, zahlerNamen: [], ...data };
+    state.mietverhaeltnisse.push(mv);
+    save();
+    return mv;
+  }
+  function updateMietverhaeltnis(id, patch) {
+    const mv = state.mietverhaeltnisse.find(mv => mv.id === id);
+    if (mv) Object.assign(mv, patch);
+    save();
+  }
+  function deleteMietverhaeltnis(id) {
+    state.mietverhaeltnisse = state.mietverhaeltnisse.filter(mv => mv.id !== id);
+    state.transaktionen.forEach(t => { if (t.mietZuordnung === id) t.mietZuordnung = ''; });
+    save();
+  }
+  // mietZuordnung an der Buchung: '' = automatisch über die Namen,
+  // eine Mietverhältnis-ID = von Hand zugeordnet, 'keine' = keine Mietzahlung.
+  function setMietZuordnung(transaktionId, wert) {
+    const t = state.transaktionen.find(t => t.id === transaktionId);
+    if (t) t.mietZuordnung = wert || '';
+    save();
+  }
+
+  // Zahlungseingang auf einem Mietkonto (ohne Transfers).
+  function istMietEingang(t) {
+    if (!t || t.betrag <= 0 || istTransfer(t)) return false;
+    const konto = state.konten.find(k => k.id === t.kontoId);
+    return konto?.typ === 'miete';
+  }
+
+  function mvLaeuftIm(mv, monat) {
+    return !!mv.von && mv.von <= monat && (!mv.bis || monat <= mv.bis);
+  }
+
+  // Welchem Mietverhältnis gehört eine Buchung? Von Hand gesetzte Zuordnung
+  // gewinnt; sonst passt ein hinterlegter Name (in Empfänger oder
+  // Beschreibung, ohne Groß-/Kleinschreibung) und der Monat liegt im
+  // Mietzeitraum.
+  function mietverhaeltnisFuerBuchung(t) {
+    if (t.mietZuordnung === 'keine') return null;
+    if (t.mietZuordnung) return state.mietverhaeltnisse.find(mv => mv.id === t.mietZuordnung) || null;
+    if (!istMietEingang(t)) return null;
+    const text = `${t.empfaenger || ''} ${t.beschreibung || ''}`.toLowerCase();
+    const monat = monthKey(t.datum);
+    return state.mietverhaeltnisse.find(mv => mvLaeuftIm(mv, monat)
+      && mv.zahlerNamen.some(n => n.trim().length >= 3 && text.includes(n.trim().toLowerCase()))) || null;
+  }
+
   window.getState = getState;
   window.replaceState = replaceState;
   window.resetState = resetState;
@@ -691,4 +766,14 @@
   window.addMietobjekt = addMietobjekt;
   window.updateMietobjekt = updateMietobjekt;
   window.deleteMietobjekt = deleteMietobjekt;
+  window.addWohnung = addWohnung;
+  window.updateWohnung = updateWohnung;
+  window.deleteWohnung = deleteWohnung;
+  window.addMietverhaeltnis = addMietverhaeltnis;
+  window.updateMietverhaeltnis = updateMietverhaeltnis;
+  window.deleteMietverhaeltnis = deleteMietverhaeltnis;
+  window.setMietZuordnung = setMietZuordnung;
+  window.istMietEingang = istMietEingang;
+  window.mvLaeuftIm = mvLaeuftIm;
+  window.mietverhaeltnisFuerBuchung = mietverhaeltnisFuerBuchung;
 })();
