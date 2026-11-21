@@ -464,7 +464,22 @@
     const abweichung = ea.summeLautAbrechnung != null && ea.summeLautAbrechnung !== '' ? summe - ea.summeLautAbrechnung : null;
     const eigene = ea.eigeneKosten.reduce((s, k) => s + eigeneKostenBetrag(k), 0);
     const eigeneUmlage = ea.eigeneKosten.filter(k => k.umlagefaehig).reduce((s, k) => s + eigeneKostenBetrag(k), 0);
-    return { summe, umlage, nichtUmlage: summe - umlage, abweichung, eigene, umlageGesamt: umlage + eigeneUmlage };
+    // Mit Heizkosten laut Messdienst ersetzen diese die Heizungsposition:
+    // umlagefähig ist nur, was auf Mieter entfällt, abzüglich deines
+    // CO2-Anteils; Leerstand und CO2-Anteil bleiben bei dir.
+    const heizPos = heizungsPosition(ea);
+    const heiz = heizSummen(ea);
+    const heizKorrektur = ea.heizkosten.length && heizPos?.umlagefaehig ? heiz.mieter - (heizPos.betrag || 0) : 0;
+    return { summe, umlage, nichtUmlage: summe - umlage, abweichung, eigene, umlageGesamt: umlage + eigeneUmlage + heizKorrektur };
+  }
+
+  function heizungsPosition(ea) {
+    return ea.positionen.find(p => /heiz/i.test(p.bezeichnung)) || null;
+  }
+  function heizSummen(ea) {
+    const gesamt = ea.heizkosten.reduce((s, h) => s + (h.gesamt || 0), 0);
+    const mieter = ea.heizkosten.filter(h => h.nutzer !== 'leerstand').reduce((s, h) => s + (h.gesamt || 0) - (h.co2Vermieter || 0), 0);
+    return { gesamt, mieter };
   }
 
   function eaZeile(w, jahr) {
@@ -484,6 +499,7 @@
         tx(' · umlagefähig '),
         mk('strong', { text: euro(z.umlageGesamt) }),
         !ea.eigeneKosten.length ? mk('span.badge.warn', { text: 'Grundsteuer fehlt', style: 'margin-left:8px' }) : null,
+        heizungsPosition(ea) && !ea.heizkosten.length ? mk('span.badge.warn', { text: 'Heizkosten A&S fehlen', style: 'margin-left:8px' }) : null,
         z.abweichung != null && Math.abs(z.abweichung) > RUNDUNG ? mk('span.badge.bad', { text: `weicht ${euro(z.abweichung)} ab`, style: 'margin-left:8px' }) : null,
       ]),
       btn('Öffnen', oeffnen, 'sm sec'),
@@ -577,12 +593,65 @@
       wrap('„Ihr Anteil an den Betriebskosten“ laut Abrechnung', sollFeld),
     ]));
     box.appendChild(fuss);
+    box.appendChild(heizkostenBlock(ea, w, speichern, neuZeichnen));
     box.appendChild(eigeneKostenBlock(ea, w, jahr, speichern, neuZeichnen));
     box.appendChild(mk('div.row', { style: 'margin-top:16px' }, [
       btn('Abrechnung löschen', () => {
         if (confirm(`Eigentümerabrechnung ${jahr} für „${w.name}“ löschen?`)) { deleteEigentuemerabrechnung(ea.id); neuZeichnen(); }
       }, 'sm danger'),
     ]));
+  }
+
+  // ── Heizkosten laut Einzelabrechnung des Messdienstes ──
+  function heizkostenBlock(ea, w, speichern, neuZeichnen) {
+    const mvs = getState().mietverhaeltnisse.filter(mv => mv.wohnungId === w.id).sort((a, b) => (a.von < b.von ? -1 : 1));
+    const block = mk('div.ea-eigene', {}, [
+      mk('h3.miete-h3', { text: 'Heizkosten laut A&S' }),
+      mk('div.sub', { text: 'Je Nutzer die „Gesamtkosten“ aus der A&S-Einzelabrechnung und den nicht umlagefähigen CO2-Anteil (unter „Anteil an Kostenposition“). Bei Leerstand nur die Gesamtkosten. Diese Werte ersetzen die Heizungsposition für die Mieter.' }),
+    ]);
+    const zeilen = ea.heizkosten.map(h => {
+      const nutzerSel = mk('select', { onchange: e => { h.nutzer = e.target.value; speichern(); neuZeichnen(); } }, [
+        mk('option', { value: '', text: '– Nutzer wählen –' }),
+        ...mvs.map(mv => mk('option', { value: mv.id, text: `${mv.mieter || 'ohne Namen'} (${mvZeitraum(mv)})` })),
+        mk('option', { value: 'leerstand', text: 'Leerstand (trägst du)' }),
+      ]);
+      nutzerSel.value = h.nutzer || '';
+      const leer = h.nutzer === 'leerstand';
+      return mk('tr', {}, [
+        mk('td', {}, [nutzerSel]),
+        mk('td', {}, [mk('input.mv-betrag', { type: 'text', inputmode: 'decimal', value: zahlText(h.gesamt), onchange: e => { h.gesamt = zahl(e.target.value); speichern(); neuZeichnen(); } })]),
+        mk('td', {}, [leer ? mk('span', { text: '–' }) : mk('input.mv-betrag', { type: 'text', inputmode: 'decimal', value: zahlText(h.co2Vermieter), onchange: e => { h.co2Vermieter = zahl(e.target.value); speichern(); neuZeichnen(); } })]),
+        mk('td.num', { text: leer ? euro(0) : euro((h.gesamt || 0) - (h.co2Vermieter || 0)) }),
+        mk('td', {}, [btn('✕', () => { ea.heizkosten = ea.heizkosten.filter(x => x !== h); speichern(); neuZeichnen(); }, 'sm sec')]),
+      ]);
+    });
+    if (zeilen.length) {
+      block.appendChild(mk('div.table-wrap', {}, [mk('table.ea-tabelle', {}, [
+        mk('tr', {}, ['Nutzer', 'Gesamtkosten €', 'CO2 nicht umlagefähig €', 'Mieter zahlt', ''].map(t => mk('th', { text: t }))),
+        ...zeilen,
+      ])]));
+    }
+    block.appendChild(mk('div.row', { style: 'margin-top:8px' }, [
+      btn('+ Nutzer', () => {
+        const belegt = new Set(ea.heizkosten.map(h => h.nutzer));
+        const vorschlag = mvs.find(mv => !belegt.has(mv.id));
+        ea.heizkosten.push({ nutzer: vorschlag ? vorschlag.id : '', gesamt: 0, co2Vermieter: 0 });
+        speichern(); neuZeichnen();
+      }, 'sm sec'),
+    ]));
+    if (ea.heizkosten.length) {
+      const pos = heizungsPosition(ea);
+      const z = heizSummen(ea);
+      const diff = pos ? z.gesamt - (pos.betrag || 0) : null;
+      block.appendChild(mk('div.ea-fuss', {}, [
+        mk('div', {}, [tx('Summe A&S: '), mk('strong', { text: euro(z.gesamt) })]),
+        mk('div', {}, [tx('davon Mieter: '), mk('strong.pos', { text: euro(z.mieter) })]),
+        diff == null ? mk('span.badge.warn', { text: 'keine Position „Heizung“ oben' })
+          : Math.abs(diff) <= RUNDUNG ? mk('span.badge.ok', { text: 'passt zur Position „Heizung“' })
+            : mk('span.badge.bad', { text: `weicht ${euro(diff)} von „Heizung“ ab` }),
+      ]));
+    }
+    return block;
   }
 
   // ── Eigene Kosten (z.B. Grundsteuer) im Overlay ──
@@ -622,7 +691,7 @@
     if (buchungsAuswahl) block.appendChild(buchungsAuswahlBlock(ea, w, jahr, speichern, neuZeichnen));
     const z = eaSummen(ea);
     block.appendChild(mk('div.ea-fuss', {}, [
-      mk('div', {}, [tx('Umlagefähig gesamt (Verwaltung + eigene Kosten): '), mk('strong.pos', { text: euro(z.umlageGesamt) })]),
+      mk('div', {}, [tx('Umlagefähig gesamt für die Mieter (Verwaltung, Heizkosten laut A&S, eigene Kosten): '), mk('strong.pos', { text: euro(z.umlageGesamt) })]),
     ]));
     return block;
   }

@@ -12,7 +12,7 @@
       sparziele: [],     // {id, name, zielbetrag, aktuellerBetrag, zieldatum, notiz}
       mietobjekte: [],   // {id, name, mieterName, sollMiete, kontoId, beginn, notizen} – altes Modell, wird nicht mehr angezeigt
       wohnungen: [],     // {id, name, flaeche, mea, selbstgenutzt}
-      eigentuemerabrechnungen: [], // {id, wohnungId, jahr: 'YYYY', summeLautAbrechnung, positionen: [{id, nr, bezeichnung, schluessel, betrag, umlagefaehig}], eigeneKosten: [{id, bezeichnung, betrag, umlagefaehig, buchungIds: []}]}
+      eigentuemerabrechnungen: [], // {id, wohnungId, jahr: 'YYYY', summeLautAbrechnung, positionen: [{id, nr, bezeichnung, schluessel, betrag, umlagefaehig}], eigeneKosten: [{id, bezeichnung, betrag, umlagefaehig, buchungIds: []}], heizkosten: [{id, nutzer: mvId|'leerstand', gesamt, co2Vermieter}]}
       mietverhaeltnisse: [], // {id, wohnungId, mieter, von: 'YYYY-MM', bis: 'YYYY-MM'|'', kaltmiete, kaltmieteAenderungen: [{ab: 'YYYY-MM', betrag}], vorauszahlung, zahlerNamen: []}
       kategorien: [],    // verwaltete Liste der Kategorienamen
       unterkategorien: [], // {id, kategorie, name} – hängen jeweils an einer Kategorie
@@ -74,6 +74,7 @@
           summeLautAbrechnung: null, ...ea,
           positionen: Array.isArray(ea.positionen) ? ea.positionen : [],
           eigeneKosten: Array.isArray(ea.eigeneKosten) ? ea.eigeneKosten.map(k => ({ ...k, buchungIds: Array.isArray(k.buchungIds) ? k.buchungIds : [] })) : [],
+          heizkosten: Array.isArray(ea.heizkosten) ? ea.heizkosten : [],
         }))
       : [];
     normalized.mietverhaeltnisse = Array.isArray(normalized.mietverhaeltnisse)
@@ -701,6 +702,9 @@
       // Eigene Kosten (z.B. Grundsteuer) gehören nicht zur Verwalterabrechnung
       // und bleiben beim Ersetzen der Positionen (Import) erhalten.
       eigeneKosten: (data.eigeneKosten || vorhanden?.eigeneKosten || []).map(k => ({ id: k.id || uid(), bezeichnung: '', betrag: 0, umlagefaehig: true, ...k, buchungIds: Array.isArray(k.buchungIds) ? k.buchungIds : [] })),
+      // Heizkosten laut Einzelabrechnung des Messdienstes (je Nutzer bzw.
+      // Leerstand), ebenfalls unabhängig vom Import der Verwalterpositionen.
+      heizkosten: (data.heizkosten || vorhanden?.heizkosten || []).map(h => ({ id: h.id || uid(), nutzer: '', gesamt: 0, co2Vermieter: 0, ...h })),
     };
     state.eigentuemerabrechnungen = state.eigentuemerabrechnungen.filter(x => x.id !== ea.id);
     state.eigentuemerabrechnungen.push(ea);
