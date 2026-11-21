@@ -19,6 +19,7 @@
     ['ausgaben', 'Ausgaben'],
     ['kategorien', 'Kategorien'],
     ['wiederkehrend', 'Wiederkehrend'],
+    ['vermietung', 'Vermietung'],
   ];
 
   const FILTER_KEY = 'finanztool_auswertung_filter';
@@ -41,22 +42,28 @@
     const defaultTo = months.filter(m => m.startsWith(String(currentYear))).at(-1) || months.at(-1) || monthKey();
 
     const gemerkt = ladeFilter();
+    // Mietkonten gehören nur in den Tab "Vermietung"; alle anderen Tabs
+    // zeigen ausschließlich die privaten Konten.
+    const privateKonten = state.konten.filter(k => k.typ !== 'miete');
     const filters = {
       von: mk('input', { type: 'month', value: gemerkt.von || defaultFrom }),
       bis: mk('input', { type: 'month', value: gemerkt.bis || defaultTo }),
       konto: mk('select', {}, [
-        mk('option', { value: '', text: 'Alle Konten' }),
-        ...state.konten.map(k => mk('option', { value: k.id, text: k.name })),
+        mk('option', { value: '', text: 'Alle privaten Konten' }),
+        ...privateKonten.map(k => mk('option', { value: k.id, text: k.name })),
       ]),
     };
-    if (gemerkt.konto && state.konten.some(k => k.id === gemerkt.konto)) filters.konto.value = gemerkt.konto;
+    if (gemerkt.konto && privateKonten.some(k => k.id === gemerkt.konto)) filters.konto.value = gemerkt.konto;
+    const kontoFeld = wrap('Konto', filters.konto);
     const tab = { current: AUSWERTUNG_TABS.some(([key]) => key === gemerkt.tab) ? gemerkt.tab : 'ueberblick' };
     const tabBar = mk('div');
     const result = mk('div');
     const update = () => {
       speichereFilter(filters, tab.current);
       renderTabBar(tabBar, tab, update);
-      renderResult(result, filteredTransactions(getState(), filters), filters, tab.current, update);
+      const vermietung = tab.current === 'vermietung';
+      kontoFeld.style.display = vermietung ? 'none' : '';
+      renderResult(result, filteredTransactions(getState(), filters, vermietung ? 'miete' : 'privat'), filters, tab.current, update);
     };
 
     Object.values(filters).forEach(input => {
@@ -65,13 +72,13 @@
     });
 
     root.appendChild(mk('h1', { text: 'Auswertung' }));
-    root.appendChild(mk('div.sub', { text: 'Ausgaben, Einnahmen und Kategorien ohne interne Transfers.' }));
+    root.appendChild(mk('div.sub', { text: 'Ausgaben, Einnahmen und Kategorien ohne interne Transfers. Mietkonten stehen im Tab „Vermietung“.' }));
     root.appendChild(mk('div.card', {}, [
       mk('h2', { text: 'Zeitraum' }),
       mk('div.row', {}, [
         wrap('Von', filters.von),
         wrap('Bis', filters.bis),
-        wrap('Konto', filters.konto),
+        kontoFeld,
       ]),
     ]));
     root.appendChild(tabBar);
@@ -113,6 +120,7 @@
       wiederkehrend: () => [
         recurringExpensesCard(detectRecurringExpenses(rows)),
       ],
+      vermietung: () => vermietungAbschnitt(rows, filters, einnahmen, ausgaben, saldo),
     };
 
     root.replaceChildren(...(abschnitte[activeTab] ? abschnitte[activeTab]() : []));
@@ -610,13 +618,41 @@
     ]);
   }
 
-  function filteredTransactions(state, filters) {
+  // Eigene Sicht auf die Mietkonten: Einnahmen, Ausgaben, Saldo und
+  // Monatstabelle wie im Überblick, dazu Einnahmen nach Empfänger (Mieter*in)
+  // und Ausgaben nach Kategorie.
+  function vermietungAbschnitt(rows, filters, einnahmen, ausgaben, saldo) {
+    if (!getState().konten.some(k => k.typ === 'miete')) {
+      return [mk('div.card', {}, [
+        mk('div.empty', { text: 'Noch kein Mietkonto angelegt. Lege unter Einstellungen → Konten ein Konto mit dem Typ „Mietkonto“ an.' }),
+      ])];
+    }
+    const zeilen = alsKategorienZeilen(rows);
+    return [
+      mk('div.grid.cols-3', {}, [
+        stat('Einnahmen', euro(einnahmen), 'pos'),
+        stat('Ausgaben', euro(Math.abs(ausgaben)), ausgaben < 0 ? 'neg' : ''),
+        stat('Saldo', euro(saldo), saldo >= 0 ? 'pos' : 'neg'),
+      ]),
+      mk('div', { style: 'margin-top:16px' }, [monatsTabelle(rows, filters)]),
+      mk('div.grid.cols-2', { style: 'margin-top:16px' }, [
+        barChartCard('Einnahmen nach Empfänger', aggregate(zeilen.filter(t => t.betrag > 0), t => t.empfaenger || 'Ohne Empfänger', t => t.betrag), 'var(--grn)'),
+        barChartCard('Ausgaben nach Kategorie', aggregate(zeilen.filter(t => t.betrag < 0), t => t.kategorie || 'Ohne Kategorie', t => Math.abs(t.betrag)), 'var(--red)'),
+      ]),
+    ];
+  }
+
+  // bereich 'privat': alle Konten außer Mietkonten (Kontofilter gilt);
+  // bereich 'miete': nur Mietkonten (Kontofilter wird ignoriert).
+  function filteredTransactions(state, filters, bereich = 'privat') {
     const from = filters.von.value || '0000-00';
     const to = filters.bis.value || '9999-99';
+    const mietKontoIds = new Set(state.konten.filter(k => k.typ === 'miete').map(k => k.id));
     return state.transaktionen
       .filter(t => !istTransfer(t))
       .filter(t => !t.ausAuswertung)
-      .filter(t => !filters.konto.value || t.kontoId === filters.konto.value)
+      .filter(t => (bereich === 'miete') === mietKontoIds.has(t.kontoId))
+      .filter(t => bereich === 'miete' || !filters.konto.value || t.kontoId === filters.konto.value)
       .filter(t => {
         const month = monthKey(t.datum);
         return month >= from && month <= to;
