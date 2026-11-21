@@ -48,7 +48,7 @@
   function mietEingaengeImJahr(jahr) {
     return getState().transaktionen
       .filter(t => (t.datum || '').startsWith(jahr))
-      .filter(t => istMietEingang(t) || t.mietZuordnung)
+      .filter(t => istMietEingang(t) || t.mietZuordnung || mietZuordnungFuerBuchung(t))
       .sort((a, b) => (a.datum < b.datum ? -1 : 1));
   }
 
@@ -91,6 +91,7 @@
         mk('li', { text: 'Wohnung anlegen, bei vermieteten Wohnungen gleich mit dem ersten Mieter.' }),
         mk('li', { text: 'Im Mietverhältnis die Kaltmiete und die Namen eintragen, wie sie auf dem Kontoauszug stehen (z.B. auch Partner*in, die überweist). Alles, was über die Kaltmiete hinaus gezahlt wird, zählt als Nebenkosten-Vorauszahlung.' }),
         mk('li', { text: 'Zahlungseingänge auf dem Mietkonto werden über diese Namen automatisch zugeordnet. Was nicht passt, steht ganz unten unter „Nicht zugeordnete Eingänge“ und lässt sich dort von Hand zuweisen.' }),
+        mk('li', { text: 'Steht „Nachzahlung“, „Abrechnung“, „Guthaben“ oder „Erstattung“ im Verwendungszweck, zählt die Zahlung zur Nebenkostenabrechnung des Vorjahres statt zur Miete. Überweisungen von dir an die Mieter*in gelten als ausgezahltes Guthaben. Beides lässt sich in der Spalte „Zuordnung“ korrigieren.' }),
       ]),
       mk('div.sub', { text: 'Monate ohne Mietverhältnis gelten als Leerstand. Bei einem Mieterwechsel legst du in der Wohnung ein weiteres Mietverhältnis an.' }),
     ]);
@@ -105,10 +106,12 @@
   // Kaltmiete, zählt keine Vorauszahlung und der Monat wird markiert.
   function monatsDaten(mvs, jahr) {
     const mvIds = new Set(mvs.map(mv => mv.id));
-    const zahlungen = mietEingaengeImJahr(jahr).filter(t => {
-      const mv = mietverhaeltnisFuerBuchung(t);
-      return mv && mvIds.has(mv.id);
+    // Nachzahlungen/Guthaben aus NK-Abrechnungen zählen nicht als Miete.
+    const zugeordnet = mietEingaengeImJahr(jahr).filter(t => {
+      const z = mietZuordnungFuerBuchung(t);
+      return z && mvIds.has(z.mv.id);
     });
+    const zahlungen = zugeordnet.filter(t => !mietZuordnungFuerBuchung(t).nkJahr);
     const summe = { kalt: 0, ist: 0, vzIst: 0, offen: 0, ohneBetrag: 0, vermietet: 0, ohneZahlung: 0 };
     let vorher = null; // letzter Monat mit Zahlung, für "NK geändert"
     const monate = monateDesJahres(jahr).map(monat => {
@@ -128,7 +131,33 @@
       if (mv && kalt && ist < kalt) summe.offen += kalt - ist;
       return zeile;
     });
-    return { monate, summe, zahlungen };
+    return { monate, summe, zugeordnet };
+  }
+
+  // Nachzahlungen und Guthaben aus Nebenkostenabrechnungen, über alle
+  // Jahre, neueste Abrechnung zuerst.
+  function nkAbrechnungsZahlungen(mvs) {
+    const mvIds = new Set(mvs.map(mv => mv.id));
+    return getState().transaktionen
+      .map(t => ({ t, z: mietZuordnungFuerBuchung(t) }))
+      .filter(({ z }) => z && z.nkJahr && mvIds.has(z.mv.id))
+      .sort((a, b) => (a.z.nkJahr !== b.z.nkJahr ? (a.z.nkJahr < b.z.nkJahr ? 1 : -1) : (a.t.datum < b.t.datum ? -1 : 1)));
+  }
+
+  function nkAbrechnungsBlock(mvs) {
+    const liste = nkAbrechnungsZahlungen(mvs);
+    if (!liste.length) return null;
+    return mk('div.mv-nk', {}, [
+      mk('div.mv-zeile-titel', { text: 'Nebenkostenabrechnungen' }),
+      ...liste.map(({ t, z }) => mk('div.mv-nk-zeile', {}, [
+        mk('span', { text: `NK-Abrechnung ${z.nkJahr} · ${z.mv.mieter || 'ohne Namen'}` }),
+        mk(t.betrag > 0 ? 'span.pos' : 'span.neg', {
+          text: t.betrag > 0
+            ? `Nachzahlung ${euro(t.betrag)} erhalten am ${fmtDate(t.datum)}`
+            : `Guthaben ${euro(-t.betrag)} ausgezahlt am ${fmtDate(t.datum)}`,
+        }),
+      ])),
+    ]);
   }
 
   function statusBadge(z) {
@@ -158,7 +187,7 @@
     }
     if (w.selbstgenutzt) return card;
 
-    const { monate, summe, zahlungen } = monatsDaten(mvs, jahr);
+    const { monate, summe, zugeordnet } = monatsDaten(mvs, jahr);
     card.appendChild(jahresZeile(mvs, summe, jahr));
 
     // Mietverhältnisse als Textzeilen, Bearbeiten öffnet das Formular.
@@ -168,10 +197,12 @@
     if (bearbeite === 'neu:' + w.id) liste.appendChild(mietverhaeltnisFormular(null, w));
     else liste.appendChild(mk('div', { style: 'margin-top:8px' }, [btn('+ Mietverhältnis hinzufügen', () => { bearbeite = 'neu:' + w.id; rerender(); }, 'sm sec')]));
     card.appendChild(liste);
+    const nk = nkAbrechnungsBlock(mvs);
+    if (nk) card.appendChild(nk);
 
     card.appendChild(aufklappbar(`monate:${w.id}`, `Monate ${jahr} anzeigen`, [monatsTabelle(monate, summe, jahr)]));
-    card.appendChild(aufklappbar(`zahlungen:${w.id}`, `Zugeordnete Zahlungen ${jahr} (${zahlungen.length})`,
-      [zahlungen.length ? buchungsTabelle(zahlungen) : mk('div.empty', { text: 'Keine zugeordneten Zahlungen.' })]));
+    card.appendChild(aufklappbar(`zahlungen:${w.id}`, `Zugeordnete Zahlungen ${jahr} (${zugeordnet.length})`,
+      [zugeordnet.length ? buchungsTabelle(zugeordnet) : mk('div.empty', { text: 'Keine zugeordneten Zahlungen.' })]));
     return card;
   }
 
@@ -368,16 +399,31 @@
     ]);
   }
 
+  // Werte: '' = automatisch, '<mvId>' = Miete, '<mvId>|<Jahr>' =
+  // Nachzahlung/Guthaben aus der NK-Abrechnung dieses Jahres, 'keine'.
   function zuordnungSelect(t) {
     const state = getState();
-    const auto = !t.mietZuordnung ? mietverhaeltnisFuerBuchung(t) : null;
+    const zuText = z => z ? `${mvLabel(z.mv)}${z.nkJahr ? ` · NK-Abrechnung ${z.nkJahr}` : ''}` : '';
+    const auto = !t.mietZuordnung ? mietZuordnungFuerBuchung(t) : null;
+    const zahlJahr = parseInt((t.datum || '').slice(0, 4), 10) || new Date().getFullYear();
+    const nkJahre = [zahlJahr - 1, zahlJahr - 2, zahlJahr].map(String);
+    if (t.mietNkJahr && !nkJahre.includes(t.mietNkJahr)) nkJahre.push(t.mietNkJahr);
     const optionen = [
-      mk('option', { value: '', text: auto ? `automatisch: ${mvLabel(auto)}` : 'automatisch (nichts passt)' }),
-      ...state.mietverhaeltnisse.map(mv => mk('option', { value: mv.id, text: mvLabel(mv) })),
+      mk('option', { value: '', text: auto ? `automatisch: ${zuText(auto)}` : 'automatisch (nichts passt)' }),
+      ...state.mietverhaeltnisse.flatMap(mv => [
+        mk('option', { value: mv.id, text: `${mvLabel(mv)} · Miete` }),
+        ...nkJahre.map(j => mk('option', { value: `${mv.id}|${j}`, text: `${mvLabel(mv)} · NK-Abrechnung ${j}` })),
+      ]),
       mk('option', { value: 'keine', text: 'keine Mietzahlung' }),
     ];
-    const sel = mk('select', { onchange: e => { setMietZuordnung(t.id, e.target.value); rerender(); } }, optionen);
-    sel.value = t.mietZuordnung || '';
+    const sel = mk('select', {
+      onchange: e => {
+        const [id, nkJahr] = e.target.value.split('|');
+        setMietZuordnung(t.id, id, nkJahr || '');
+        rerender();
+      },
+    }, optionen);
+    sel.value = t.mietZuordnung && t.mietZuordnung !== 'keine' && t.mietNkJahr ? `${t.mietZuordnung}|${t.mietNkJahr}` : (t.mietZuordnung || '');
     return sel;
   }
 

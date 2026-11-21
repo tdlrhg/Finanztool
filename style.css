@@ -175,3 +175,7 @@ label { font-size: 12px; font-weight: 600; color: var(--tx2); display: block; ma
 .mv-namen { flex: 1; min-width: 220px; }
 .mv-namen input { width: 100%; }
 .mv-beschreibung { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mv-nk { margin-top: 12px; }
+.mv-nk-zeile { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 12px; font-size: 13px; padding: 4px 0; border-bottom: 1px solid var(--surf2); }
+.mv-nk-zeile .pos { color: var(--grn); font-weight: 600; }
+.mv-nk-zeile .neg { color: var(--red); font-weight: 600; }

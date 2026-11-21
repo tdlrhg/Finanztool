@@ -58,6 +58,7 @@
           detailPositionen: [],
           ausAuswertung: false,
           mietZuordnung: '',
+          mietNkJahr: '',
           ...t,
           tags: normalizeTags(t.tags),
           detailPositionen: normalizeDetailPositionen(t.detailPositionen),
@@ -691,40 +692,79 @@
   }
   // mietZuordnung an der Buchung: '' = automatisch über die Namen,
   // eine Mietverhältnis-ID = von Hand zugeordnet, 'keine' = keine Mietzahlung.
-  function setMietZuordnung(transaktionId, wert) {
+  // mietNkJahr (nur bei Zuordnung von Hand): gesetzt = Nachzahlung bzw.
+  // Guthaben aus der Nebenkostenabrechnung dieses Jahres, leer = Miete.
+  function setMietZuordnung(transaktionId, wert, nkJahr = '') {
     const t = state.transaktionen.find(t => t.id === transaktionId);
-    if (t) t.mietZuordnung = wert || '';
+    if (t) {
+      t.mietZuordnung = wert || '';
+      t.mietNkJahr = wert && wert !== 'keine' ? String(nkJahr || '') : '';
+    }
     save();
   }
 
-  // Zahlungseingang auf einem Mietkonto (ohne Transfers).
-  function istMietEingang(t) {
-    if (!t || t.betrag <= 0 || istTransfer(t)) return false;
+  // Buchung auf einem Mietkonto (ohne Transfers).
+  function istMietBuchung(t) {
+    if (!t || !t.betrag || istTransfer(t)) return false;
     const konto = state.konten.find(k => k.id === t.kontoId);
     return konto?.typ === 'miete';
+  }
+  function istMietEingang(t) {
+    return istMietBuchung(t) && t.betrag > 0;
   }
 
   function mvLaeuftIm(mv, monat) {
     return !!mv.von && mv.von <= monat && (!mv.bis || monat <= mv.bis);
   }
 
-  // Welchem Mietverhältnis gehört eine Buchung? Von Hand gesetzte Zuordnung
-  // gewinnt; sonst passt ein hinterlegter Name (in Empfänger oder
-  // Beschreibung, ohne Groß-/Kleinschreibung) und der Monat liegt im
-  // Mietzeitraum.
-  function mietverhaeltnisFuerBuchung(t) {
-    if (t.mietZuordnung === 'keine') return null;
-    if (t.mietZuordnung) return state.mietverhaeltnisse.find(mv => mv.id === t.mietZuordnung) || null;
-    if (!istMietEingang(t)) return null;
+  // Stichwörter für Nachzahlungen/Guthaben aus der Nebenkostenabrechnung.
+  // "Nebenkosten" allein reicht bewusst nicht, weil normale Mietzahlungen
+  // oft "Miete inkl. Nebenkosten" im Verwendungszweck tragen.
+  const NK_ABRECHNUNG_STICHWORTE = /nachzahlung|abrechnung|guthaben|erstattung/;
+
+  // Abrechnungsjahr: eine Jahreszahl im Text, die vor dem Zahlungsjahr
+  // liegt, sonst das Vorjahr der Zahlung.
+  function nkJahrAusText(text, datum) {
+    const zahlJahr = parseInt((datum || '').slice(0, 4), 10) || new Date().getFullYear();
+    const jahre = (text.match(/\b(19|20)\d{2}\b/g) || []).map(Number).filter(j => j < zahlJahr);
+    return String(jahre.length ? Math.max(...jahre) : zahlJahr - 1);
+  }
+
+  // Zu welchem Mietverhältnis gehört eine Buchung, und ist sie Miete oder
+  // eine Nachzahlung/ein Guthaben aus einer Nebenkostenabrechnung?
+  // Liefert { mv, nkJahr } (nkJahr '' = Miete) oder null.
+  // Von Hand gesetzte Zuordnung gewinnt. Automatisch:
+  // - Name passt (alle Wörter, Reihenfolge egal; Banken schreiben oft
+  //   "Nachname, Vorname"), gesucht in Empfänger und Beschreibung;
+  // - Ausgang an die Mieter*in oder Stichwort wie "Nachzahlung" =
+  //   NK-Abrechnung, sonst Eingang im Mietzeitraum = Miete.
+  function mietZuordnungFuerBuchung(t) {
+    if (!t || t.mietZuordnung === 'keine') return null;
+    if (t.mietZuordnung) {
+      const mv = state.mietverhaeltnisse.find(mv => mv.id === t.mietZuordnung);
+      return mv ? { mv, nkJahr: t.mietNkJahr || '' } : null;
+    }
+    if (!istMietBuchung(t)) return null;
     const text = `${t.empfaenger || ''} ${t.beschreibung || ''}`.toLowerCase();
     const monat = monthKey(t.datum);
-    // Alle Wörter des Namens müssen vorkommen, die Reihenfolge ist egal —
-    // Banken schreiben oft "Nachname, Vorname".
     const passt = name => {
       const woerter = name.toLowerCase().split(/[\s,]+/).filter(w => w.length >= 2);
       return woerter.join('').length >= 3 && woerter.every(w => text.includes(w));
     };
-    return state.mietverhaeltnisse.find(mv => mvLaeuftIm(mv, monat) && mv.zahlerNamen.some(passt)) || null;
+    const kandidaten = state.mietverhaeltnisse.filter(mv => mv.zahlerNamen.some(passt));
+    if (!kandidaten.length) return null;
+    const imZeitraum = kandidaten.find(mv => mvLaeuftIm(mv, monat));
+    if (t.betrag < 0 || NK_ABRECHNUNG_STICHWORTE.test(text)) {
+      // Nachzahlungen kommen oft erst nach dem Auszug: dann das letzte
+      // Mietverhältnis, das vor der Zahlung begonnen hat.
+      const mv = imZeitraum || kandidaten.filter(mv => mv.von && mv.von <= monat).sort((a, b) => (a.von < b.von ? 1 : -1))[0];
+      return mv ? { mv, nkJahr: nkJahrAusText(text, t.datum) } : null;
+    }
+    return imZeitraum ? { mv: imZeitraum, nkJahr: '' } : null;
+  }
+
+  function mietverhaeltnisFuerBuchung(t) {
+    return mietZuordnungFuerBuchung(t)?.mv || null;
   }
 
   window.getState = getState;
@@ -779,6 +819,8 @@
   window.deleteMietverhaeltnis = deleteMietverhaeltnis;
   window.setMietZuordnung = setMietZuordnung;
   window.istMietEingang = istMietEingang;
+  window.istMietBuchung = istMietBuchung;
+  window.mietZuordnungFuerBuchung = mietZuordnungFuerBuchung;
   window.mvLaeuftIm = mvLaeuftIm;
   window.mietverhaeltnisFuerBuchung = mietverhaeltnisFuerBuchung;
 })();
